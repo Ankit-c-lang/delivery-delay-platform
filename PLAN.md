@@ -38,6 +38,7 @@ training run
   → winner gets the `champion` alias
   → FastAPI resolves models:/delivery_delay_classifier@champion at startup
   → a parity test proves the API's predictions match the training pipeline's to 1e-6
+    for the same raw record and the same artifact (§18 A6)
 ```
 
 If any link in that chain is faked — most student versions of this project unpickle a `model.pkl` committed to the repo — the project collapses under one question. Build this chain first in skeleton form, then make each link good.
@@ -61,7 +62,7 @@ If any link in that chain is faked — most student versions of this project unp
 11. SHAP analysis logged to MLflow as artifacts, computed offline.
 12. MLflow with a SQLite backend store and local filesystem artifacts: params, metrics, plots, model signature, input example, and the preprocessing artifact.
 13. Model Registry with `champion` / `challenger` aliases.
-14. **Retraining lifecycle**: v1 trained on 2017 data, v2 on 2017 + early-2018, both scored on the same untouched 2018-05→08 holdout, with a scripted promotion gate.
+14. **Retraining lifecycle**: v1 trained on 2017 data, v2 on 2017 + early-2018, both scored on the same frozen 2018-05→08 promotion evaluation set, with a scripted promotion gate.
 15. FastAPI service: `/health`, `/predict`, `/predict/batch`, `/model/info`. Model loaded once at startup, resolved from the registry.
 16. **Train/serve parity test** — the highest-value test in the repo.
 17. Multi-stage Dockerfile, plus Docker Compose with `postgres`, `mlflow`, `api`.
@@ -114,7 +115,7 @@ PostgreSQL `features.orders_analytical`  (one row per order, ~96k rows)
    ▼
 [ AS-OF AGGREGATES ]  src/features/history.py
    │  monthly expanding stats per seller / route / category,
-   │  each month using only orders purchased strictly before it
+   │  each month using only orders DELIVERED strictly before it (§18 A1)
    ▼
 PostgreSQL `features.seller_monthly`, `features.route_monthly`, `features.category_monthly`
    │
@@ -232,7 +233,7 @@ This is the business-useful framing (flag at-risk orders at checkout so ops can 
 
 **Not leakage, despite looking like it:**
 - `order_estimated_delivery_date` — shown to the customer at checkout. `promised_days` is your single strongest feature.
-- `shipping_limit_date` (order_items) — a contractual seller deadline set at order time.
+- `shipping_limit_date` (order_items) — a contractual seller deadline set at order time. **Verified against the data, not assumed (§18 A4):** across 110,189 order items none has a `shipping_limit_date` earlier than its `order_purchase_timestamp`, and the minimum offset is a hard 2.00 days, consistent with an SLA assigned at checkout. Two caveats — winsorize the tail (one item sits 1,052 days out), and audit `days_to_shipping_limit` for near-collinearity with `promised_days` in the §5 correlation pass.
 
 ### 4.3 Target definition
 
@@ -247,18 +248,23 @@ Population filter: `order_status == 'delivered'` AND `order_delivered_customer_d
 ### 4.4 The timeline
 
 ```
-2017-01-01 ──────► 2017-04-30   WARM-UP      aggregates only, zero training rows
-2017-05-01 ──────► 2017-12-31   V1 TRAIN
-2018-01-01 ──────► 2018-02-28   VAL          blend weights, calibration, threshold
-2018-03-01 ──────► 2018-04-30   V2 EXTENSION added to train for v2 only
-2018-05-01 ──────► 2018-08-31   HOLDOUT      frozen; touched exactly twice, at the very end
+2017-01-01 ──────► 2017-04-30   WARM-UP   aggregates only, zero training rows
+
+v1   TRAIN  2017-05-01 ──► 2017-12-31
+     VAL    2018-01-01 ──► 2018-02-28   blend weights, calibration, threshold
+
+v2   TRAIN  2017-05-01 ──► 2018-02-28   (v1's train window + v1's val window)
+     VAL    2018-03-01 ──► 2018-04-30   blend weights, calibration, threshold
+
+     2018-05-01 ──────► 2018-08-31   PROMOTION EVALUATION SET
+                                     shared by both versions, scored twice, at the very end
 ```
 
 Rules:
 - Orders before 2017-01-01 are dropped (only a few hundred, and messy).
 - Orders purchased after 2018-08-31 are dropped — delivery records tail off and the target is unreliable.
-- **v1** trains on 2017-05→2017-12. **v2** trains on 2017-05→2018-04 with aggregates refreshed through 2018-04.
-- The holdout is loaded by exactly one script, `src/evaluation/score_holdout.py`, and that script is called only by the promotion gate. Do not import the holdout anywhere else. Consider a runtime guard that raises if it's loaded during training.
+- Windows are **per version**, and `configs/splits.yaml` is keyed by version. **v1** fits on 2017-05→2017-12 and calibrates on 2018-01→2018-02. **v2** fits on 2017-05→2018-02 and calibrates on 2018-03→2018-04, with aggregates refreshed through 2018-04. Fitting and calibration windows must be disjoint for every version — the first draft had v2 training on its own validation window, which would have made its blend weights, calibration and cost-optimal threshold all in-sample (§18 A2). A sliding validation window is also what happens in production.
+- The 2018-05→08 window is loaded by exactly one script, `src/evaluation/score_holdout.py`, called only by the promotion gate. Do not import it anywhere else — **the parity test uses `tests/fixtures/`, never this window** (§18 A3). Consider a runtime guard that raises if it's loaded during training. Because it decides which model gets promoted, describe it as a **promotion evaluation set**, not an untouched generalization estimate.
 - November 2017 contains a Black Friday order spike with visibly degraded delivery performance. That's free narrative for both the drift report and the "why does v2 differ from v1" answer.
 
 ### 4.5 As-of monthly aggregates — the leakage-safe design
@@ -267,9 +273,13 @@ Historical performance features (seller late rate, route late rate) are the most
 
 **Design: monthly expanding snapshots.**
 
-For every entity *E* (seller_id, route = seller_state→customer_state, product category) and every calendar month *M* in the analysis window, compute statistics over **all delivered orders with `order_purchase_timestamp < first day of M`**. Store as `features.{entity}_monthly` keyed on `(entity_id, snapshot_month)`.
+For every entity *E* (seller_id, route = seller_state→customer_state, product category) and every calendar month *M* in the analysis window, compute statistics over **all orders whose delivery outcome was already known before *M*, i.e. `order_delivered_customer_date < first day of M`**. Store as `features.{entity}_monthly` keyed on `(entity_id, snapshot_month)`.
 
-At feature-assembly time, each order joins to the snapshot for **its own purchase month**. Since that snapshot contains only strictly-prior orders, no row can see itself or its future. The warm-up window exists so that 2017-05 rows already have four months of history behind them.
+At feature-assembly time, each order joins to the snapshot for **its own purchase month**. Since that snapshot contains only orders already *delivered* before *M*, no row can see itself, its future, or an outcome that had not yet happened.
+
+Filtering on `order_purchase_timestamp` instead — as the first draft of this plan did — is a real leak, and a target-correlated one. Late orders take a median 31 days to deliver against 9 for on-time orders, so the orders still in flight at any cutoff are **3-7x more likely to be late** than the resolved ones. Admitting them injects future late-outcomes into exactly the feature family this section calls the most predictive available. Measured on the real data, see §18 A1.
+
+The warm-up window exists so that 2017-05 rows already have four months of *resolved* history behind them.
 
 At **serving** time the API uses the single latest snapshot, bundled inside the preprocessing artifact. Retraining refreshes it — which is a second, independent reason v2 differs from v1, and a nice thing to say out loud.
 
@@ -384,7 +394,7 @@ Log both. Let the promotion gate decide.
 ### 6.6 Leakage checklist — turn each line into a test
 
 - [ ] No forbidden column (§4.2) appears in the feature matrix. Assert against an explicit denylist.
-- [ ] Aggregate snapshots for month *M* contain no order purchased in or after *M*.
+- [ ] Aggregate snapshots for month *M* contain no order whose outcome was unresolved at *M*. Assert `max(order_delivered_customer_date) < M`, **not** `max(order_purchase_timestamp) < M` (§18 A1).
 - [ ] Imputation values, category levels and calibrators are fitted on training rows only.
 - [ ] `TimeSeriesSplit`, never `KFold`.
 - [ ] Holdout is loaded by exactly one module.
@@ -426,7 +436,7 @@ Log Optuna trials to the study, not as 40 MLflow runs — otherwise the UI is un
 
 Wrapping everything in a single **`pyfunc`** is the key call. It means the API receives raw order records and gets back a probability and a decision, with zero preprocessing logic duplicated in the serving layer. It's the structural fix for train/serve skew, not just a convenience.
 
-**Registry.** Model name `delivery_delay_classifier`. Use **aliases** (`@champion`, `@challenger`), not the deprecated stage API — MLflow 2.9+ deprecated stages, and using aliases signals you're current. Set tags on each version: training window, holdout PR-AUC, git SHA, promotion decision and reason.
+**Registry.** Model name `delivery_delay_classifier`. Use **aliases** (`@champion`, `@challenger`), not the stage API — stages were deprecated in MLflow 2.9 and **removed in MLflow 3**, which is the version that resolves here (3.16.1), so aliases are the only mechanism available. Note `log_model(name=...)` replaces 2.x's `artifact_path=` (§18 A7). Set tags on each version: training window, holdout PR-AUC, git SHA, promotion decision and reason.
 
 ---
 
@@ -501,7 +511,7 @@ Supporting all three isn't a hack; being able to pin a version *is* your rollbac
 
 ### 10.1 Dockerfile
 
-Multi-stage on `python:3.11-slim`:
+Multi-stage on `python:3.12-slim`:
 - **Stage 1 (builder):** install build deps, `pip install --user -r requirements.txt`
 - **Stage 2 (runtime):** copy site-packages and app code only, create a non-root user, `HEALTHCHECK` hitting `/health`, `CMD uvicorn`
 
@@ -519,7 +529,7 @@ services:
   # trainer:  # profiles: ["training"] — optional, does not start by default
 ```
 
-Use `depends_on: condition: service_healthy`, not bare `depends_on` — otherwise the API races Postgres on cold start and you'll spend an hour debugging it. Credentials come from `.env`; ship `.env.example`. `docker compose up` must be the entire deployment story.
+Use `depends_on: condition: service_healthy`, not bare `depends_on` — otherwise the API races Postgres on cold start and you'll spend an hour debugging it. Credentials come from `.env`; ship `.env.example`. **Host ports come from `.env` as well — publish the API on host 8001, since 8000 belongs to another project on this machine.** `docker compose up` is the entire deployment story *once a model is registered*: on a clean machine the registry is empty, the API cannot resolve `@champion`, and it will correctly refuse to start. The ordered bootstrap in §18 A5 (`make bootstrap`) runs first, and the README's one-command claim must be scoped to say so.
 
 ### 10.3 GitHub Actions
 
@@ -547,13 +557,13 @@ Use `depends_on: condition: service_healthy`, not bare `depends_on` — otherwis
 | Software | Version | Notes |
 |---|---|---|
 | Linux environment | Ubuntu 22.04 / 24.04 | **VM, WSL2, or native — all fine.** Develop on Linux, not bare Windows: path handling, line endings and Docker volume mounts all behave. |
-| Python | **3.11.x or 3.12.x** | Ubuntu 24.04 ships 3.12; wheels for the whole stack are fine on both. This document assumes **3.11** (`python:3.11-slim`, `ci.yml`, `CLAUDE.md`). If you use 3.12, change it in all three — a version mismatch between local, Docker and CI is a slow, annoying bug. |
+| Python | **3.12.x** | **Decided: 3.12**, the Ubuntu 24.04 system interpreter. Verified — the full 117-package stack resolves on 3.12 with binary wheels only, zero source builds. `python:3.12-slim`, `ci.yml` and `CLAUDE.md` are all 3.12; keep them identical, because a `pip freeze` lockfile is only valid for the interpreter that produced it (§18 A7). |
 | Git | latest | Add a `.gitattributes` pinning LF |
 | Docker Engine + Compose plugin | latest | Installed **inside** the Linux environment. Docker Desktop is only needed if the host is Windows/macOS. Add your user to the `docker` group. |
 | VS Code | latest | Remote-SSH (VM) or Remote-WSL, plus Python and Docker extensions |
 | Claude Code | latest | Run it from the Linux terminal inside VS Code |
 | PostgreSQL | 16 | **Container only** — do not install natively |
-| MLflow | 2.16+ | pip, not a separate install |
+| MLflow | **3.16+** | pip, not a separate install. Stages are *removed* in 3.x, so §7's alias-based registry design becomes the only option rather than merely the current one. `log_model` takes `name=` where 2.x took `artifact_path=` (§18 A7). |
 
 **Repo location.** Keep the repo on the Linux filesystem (`~/projects/...`) — never a VMware shared folder or `/mnt/c/...`. Cross-filesystem I/O is dramatically slower and makes every pandas operation feel inexplicably broken.
 
@@ -659,7 +669,7 @@ Tests are written **inside** each phase, not batched. Every phase ends green.
 
 **Objective:** repo, tooling, and Compose skeleton running.
 
-**Tasks:** working Linux environment with Docker Engine + Compose plugin; venv on Python 3.11; `pyproject.toml` with ruff/black/pytest; `.gitignore` (must include `data/`, `mlartifacts/`, `mlflow.db`, `.env`); pre-commit; `docker-compose.yml` with `postgres` + `mlflow`; a stub `ci.yml` running lint on push.
+**Tasks:** working Linux environment with Docker Engine + Compose plugin; venv on Python 3.12; `pyproject.toml` with ruff/black/pytest; `.gitignore` (must include `data/`, `mlartifacts/`, `mlflow.db`, `.env`); pre-commit; `docker-compose.yml` with `postgres` + `mlflow`; a stub `ci.yml` running lint on push.
 
 **Verify:** `docker compose up postgres mlflow` → MLflow UI at `localhost:5000`, `psql` connects. CI green on the first push.
 
@@ -682,7 +692,7 @@ Create:
    HTTP healthcheck). No api service yet.
 5. src/db.py — SQLAlchemy engine factory reading from pydantic-settings
 6. configs/base.yaml and configs/splits.yaml with the §4.4 dates
-7. .github/workflows/ci.yml — checkout, Python 3.11, install
+7. .github/workflows/ci.yml — checkout, Python 3.12, install
    requirements-dev.txt, ruff check, black --check. No tests yet.
 8. requirements.txt / requirements-dev.txt / requirements-api.txt,
    unpinned for now — I'll freeze after first install.
@@ -786,7 +796,7 @@ would mean if you got 45% instead.
 
 **Common mistakes:** including month *M*'s own orders in the *M* snapshot (the whole point is to exclude them); silently imputing cold-start entities instead of flagging; column order drifting between fit and transform.
 
-**Tests (this is where the leakage tests live):** a snapshot for month *M* contains no order from *M* or later; a synthetic seller whose late rate changes sharply mid-period gets the *prior* rate, not the blended one; cold-start rows get `is_new=True` and the fallback value; `transform()` on the same input twice is identical; feature count and order match the artifact; `max(train.purchase) < min(val.purchase) < min(holdout.purchase)`.
+**Tests (this is where the leakage tests live):** a snapshot for month *M* contains no order *delivered* on or after *M* (outcome availability, not purchase date — §18 A1); a synthetic seller whose late rate changes sharply mid-period gets the *prior* rate, not the blended one; cold-start rows get `is_new=True` and the fallback value; `transform()` on the same input twice is identical; feature count and order match the artifact; `max(train.purchase) < min(val.purchase) < min(holdout.purchase)`.
 
 **Completion:** all leakage tests green. Do not proceed until they are.
 
@@ -800,8 +810,10 @@ src/features/history.py — as-of monthly aggregate snapshots.
 
 For each entity type (seller_id; route = seller_state||'_'||customer_state;
 product_category) and each calendar month M in the analysis window,
-compute over ALL delivered orders with purchase_timestamp STRICTLY
-BEFORE the first day of M:
+compute over ALL orders DELIVERED strictly before the first day of M
+(order_delivered_customer_date < M). Filtering on purchase_timestamp
+leaks future outcomes and the leak favours the positive class — see
+PLAN.md §18 A1:
   - order_count, late_rate, avg_delivery_days, avg_handling_days
 Write to features.{entity}_monthly keyed (entity_id, snapshot_month).
 
@@ -810,7 +822,8 @@ purchase month, with cold-start fallback: entity → entity's state →
 global, plus an is_new boolean flag.
 
 Tests in tests/test_features_history.py:
-  1. For a snapshot month M, no contributing order has purchase >= M
+  1. For a snapshot month M, no contributing order has
+     order_delivered_customer_date >= M (outcome availability)
   2. Synthetic seller with late_rate 0.0 in months 1-3 then 1.0 in
      month 4 → the month-4 snapshot shows 0.0, not 0.25
   3. An entity's first-ever order gets is_new=True and the fallback
@@ -948,7 +961,7 @@ rather than being loaded separately by the API.
 
 **Common mistakes:** loading the model per request; returning 500 for unseen categories; letting any preprocessing logic leak into the API layer (it all belongs in the pyfunc).
 
-**Tests:** health when loaded and when not; single and batch predict; 422 on malformed input; batch size cap; unseen category returns 200 with a warning; **parity — 20 rows through the training pipeline and through the API TestClient, predictions equal within 1e-6**.
+**Tests:** health when loaded and when not; single and batch predict; 422 on malformed input; batch size cap; unseen category returns 200 with a warning; **parity — 20 rows from `tests/fixtures/` through the training pipeline and through the API TestClient, the same artifact on both sides, predictions equal within 1e-6** (§18 A3, A6).
 
 **Completion:** parity green; p50/p95 recorded.
 
@@ -968,10 +981,15 @@ Structure exactly as §9. Requirements:
 - Zero preprocessing logic in the API layer; the pyfunc does all of it
 
 Then the test that matters most, tests/test_parity.py:
-  Take 20 rows from the holdout. Run them through the training-time
-  path (PreprocessingArtifact + model directly). Run the same 20 raw
-  records through the API via TestClient using a locally-saved fixture
-  model. Assert probabilities match within 1e-6.
+  Take 20 rows from tests/fixtures/ — NEVER the promotion evaluation
+  set, which only score_holdout.py may load (§18 A3). Run them through
+  the training-time path (PreprocessingArtifact + model directly). Run
+  the same 20 raw records through the API via TestClient using the same
+  locally-saved fixture model and the SAME artifact. Assert
+  probabilities match within 1e-6.
+  Parity is scoped to ONE fixed artifact. Snapshot selection is outside
+  its scope: training joins each order to its own purchase-month
+  snapshot, serving uses the latest bundled one (§18 A6).
 
 Finally scripts/benchmark_latency.py — p50/p95 for single and batch-100.
 
@@ -982,20 +1000,20 @@ Write test_parity.py BEFORE the API implementation.
 
 ### Phase 8 — Docker and Compose (3 h, medium)
 
-**Objective:** `docker compose up` gives a working stack from clean.
+**Objective:** `docker compose up` gives a working stack from clean, once `make bootstrap` has registered a first model (§18 A5).
 
 **Common mistakes:** no `.dockerignore` (huge build context); bare `depends_on` racing Postgres; installing the full training stack into the API image; running as root.
 
 **Tests:** image builds; container passes healthcheck; `/predict` works against the containerized service.
 
-**Completion:** `docker compose down -v && docker compose up` → healthy stack, working prediction.
+**Completion:** `docker compose down && docker compose up` → healthy stack, working prediction. **Never pass `-v`** — it destroys named volumes, and from the wrong directory it destroys another project's (§18 A5).
 
 ```
 Read CLAUDE.md and PLAN.md §10.1, §10.2.
 
 Phase 8: containerize the API and complete Compose.
 
-1. Multi-stage Dockerfile on python:3.11-slim. Builder installs
+1. Multi-stage Dockerfile on python:3.12-slim. Builder installs
    requirements-api.txt (NOT the training stack). Runtime copies
    site-packages + api/ + the src modules the pyfunc needs.
    Non-root user. HEALTHCHECK on /health. Under 40 lines.
@@ -1009,8 +1027,9 @@ Phase 8: containerize the API and complete Compose.
 5. Optional trainer service under profiles: ["training"]
 6. .env.example with every variable Compose reads
 
-Verify: docker compose down -v && docker compose up -d, wait for
+Verify: docker compose down && docker compose up -d, wait for
 healthy, curl /health and /predict. Report the results.
+Never pass -v to down; it deletes named volumes (§18 A5).
 ```
 
 ---
@@ -1121,18 +1140,31 @@ promised date. The project's purpose is the MLOps lifecycle, not the model.
    may become a feature. Denylist: order_approved_at,
    order_delivered_carrier_date, order_delivered_customer_date,
    order_status, all review columns.
-2. As-of aggregates for month M use only orders purchased strictly before M.
-3. The holdout (2018-05 → 2018-08) is loaded ONLY by
-   src/evaluation/score_holdout.py.
+2. As-of aggregates for snapshot month M use only orders whose DELIVERY
+   OUTCOME was known before M (order_delivered_customer_date < M).
+   Filtering on order_purchase_timestamp leaks future outcomes, and the
+   leak is biased toward late orders — they take ~3x longer to resolve.
+3. The 2018-05 → 2018-08 window is loaded ONLY by
+   src/evaluation/score_holdout.py, called only by the promotion gate.
+   The parity test uses tests/fixtures/, never that window. It is a
+   PROMOTION EVALUATION set, not an untouched generalization estimate.
 4. All preprocessing lives inside the MLflow pyfunc wrapper. The API layer
    contains none.
 5. Time-based CV only. StratifiedKFold/KFold are forbidden.
-6. Split dates come from configs/splits.yaml. Never hardcode them.
+6. Split dates come from configs/splits.yaml, which is keyed PER VERSION.
+   Fitting and calibration windows must be disjoint for every version.
 7. Tests are written in the same phase as the code they cover.
+8. Parity means: same raw record + same artifact -> same probability within
+   1e-6. Snapshot selection is outside parity's scope; serving uses the
+   latest bundled snapshot by design.
+9. pandas 3 copy-on-write: no chained assignment, never mutate a slice.
+10. Host ports come from .env. The API publishes on host 8001 — 8000
+    belongs to the realtime-fraud-detection project on this machine.
+    Never `docker compose down -v`; never `docker system/image prune -a`.
 
 ## Stack
-Python 3.11 · PostgreSQL 16 (Compose) · pandas · LightGBM/XGBoost/CatBoost ·
-Optuna · SHAP · MLflow (SQLite backend) · FastAPI · Docker Compose ·
+Python 3.12 · PostgreSQL 16 (Compose) · pandas 3 · LightGBM/XGBoost/CatBoost ·
+Optuna · SHAP · MLflow 3 (SQLite backend) · FastAPI · Docker Compose ·
 GitHub Actions → GHCR
 
 ## Style
@@ -1201,4 +1233,149 @@ The last row is the important one. Parity testing and promotion gates are things
 2. In your Linux environment, install Docker Engine + the Compose plugin, add yourself to the `docker` group, and confirm `docker run hello-world` works without sudo.
 3. Create the repo, write `CLAUDE.md` from §14.1 by hand — don't generate it.
 4. Re-read §4.2 and §4.5. Those two sections are the project.
-5. Start Phase 0.
+5. Read §18. A design review found six defects in the first draft; the amendments are binding, and the body of this document has been patched to match them.
+6. Start Phase 0.
+
+---
+
+## 18. Amendments (design review, 2026-09-28)
+
+A review of v1 of this plan found six defects, plus one change forced by library
+versions. All are resolved below and the body of the document has been patched to
+match. **Where the body and this section disagree, this section wins.** The original
+unamended plan is preserved in git history at commit `d63c6c0` — the diff is the record
+of what changed and why, and it is worth reading before an interview, because "I found
+a target-correlated leak in my own design and measured it" is a stronger answer than a
+plan that was simply right the first time.
+
+### A1 — As-of aggregates leaked future outcomes *(severity: high)*
+
+**Defect.** §4.5 built snapshot *M* from orders with `order_purchase_timestamp < M`. An
+order purchased 30 January and delivered 10 February has no known outcome on 1 February,
+yet it contributed its late/on-time label to the 1 February snapshot.
+
+**Evidence** (measured on `data/raw/`, 96,470 delivered orders):
+
+| snapshot cutoff | orders admitted | unresolved at cutoff | late% resolved | late% **unresolved** |
+|---|---|---|---|---|
+| 2017-07-01 | 14,199 | 7.7% | 3.20% | 11.25% |
+| 2017-10-01 | 26,414 | 6.0% | 3.07% | 12.17% |
+| 2018-01-01 | 43,693 | 5.7% | 4.28% | 27.68% |
+| 2018-04-01 | 64,320 | 6.0% | 5.97% | 39.10% |
+
+Median delivery lag is **31 days for late orders against 9 for on-time** ones, so orders
+still in flight at a cutoff are mechanically 3-7x more likely to be late. The leak is
+therefore *biased toward the positive class* and inflates precisely the feature families
+(F6/F7/F8) that §4.5 calls the most predictive available.
+
+**Resolution.** Snapshot *M* admits an order only if
+`order_delivered_customer_date < first day of M`. The Phase 3 test asserts on delivery
+date, not purchase date. Snapshots thin slightly and the warm-up window matters more;
+with a 10-day median lag, four months remains ample.
+
+### A2 — v2 trained on its own validation window *(severity: high)*
+
+**Defect.** §4.4 reserved 2018-01→02 for blend weights, calibration and threshold, then
+had v2 train on 2017-05→2018-04, which contains it. Every quantity §6.5 fits on the
+validation period would have been in-sample for v2.
+
+**Resolution.** Windows are per version, and `configs/splits.yaml` is keyed by version:
+
+| | fit | calibrate / select | promotion evaluation |
+|---|---|---|---|
+| **v1** | 2017-05 → 2017-12 | 2018-01 → 2018-02 | 2018-05 → 2018-08 |
+| **v2** | 2017-05 → 2018-02 | 2018-03 → 2018-04 | 2018-05 → 2018-08 |
+
+Fitting and calibration stay disjoint, the evaluation window is untouched by either, v2
+still sees more data than v1 (10 months against 8), and a sliding validation window is
+what a real retraining cadence does anyway.
+
+### A3 — Two required tests contradicted each other *(severity: high)*
+
+**Defect.** Phase 7's prompt said *"take 20 rows from the holdout"* for the parity test.
+Phase 9's test asserts *"the holdout is loaded by exactly one module, via import
+inspection."* Both cannot pass.
+
+**Resolution.** Parity uses `tests/fixtures/`, which §10.3 already mandates because CI
+cannot use the real dataset. No extra work — strictly less.
+
+Separately: the 2018-05→08 window decides promotions, so it is a **promotion evaluation
+set**, not a pristine generalization estimate. With two gate evaluations the selection
+bias is negligible, but the README and CV must name it accurately rather than imply it
+was never used for selection. Carving out a third period was considered and rejected: it
+costs evaluation-set size for a bias that two evaluations cannot meaningfully induce.
+State that trade-off in the limitations section instead of hiding it.
+
+### A4 — `shipping_limit_date` availability was asserted, not shown *(severity: low)*
+
+**Defect.** §4.2 declared it available at checkout with no evidence.
+
+**Evidence.** Across 110,189 order items: **zero** rows have `shipping_limit_date`
+earlier than `order_purchase_timestamp`; the offset has a hard floor at 2.00 days,
+median 6.01, p99 18.96. The distribution sits just above whole-day values, consistent
+with `purchase_ts + N days` assigned at order time.
+
+**Resolution.** Keep the feature — the evidence supports the claim. Two caveats:
+`max = 1,052 days` is a data-quality outlier needing winsorizing, and only 3.3% of
+offsets are exact whole days across 55 distinct values, so it is not one clean rule.
+Audit `days_to_shipping_limit` for near-collinearity with `promised_days` in the §5
+correlation pass and drop it if it adds nothing.
+
+### A5 — No bootstrap path on a clean machine *(severity: medium)*
+
+**Defect.** §9 has the API resolve `@champion` at startup and fail loudly otherwise.
+§10.2 claimed `docker compose up` was the entire deployment story. On a fresh clone the
+registry is empty, so both cannot hold.
+
+**Resolution.** An explicit ordered bootstrap, exposed as `make bootstrap`:
+
+```
+postgres + mlflow up  →  load-raw  →  build-orders  →  features
+                      →  train v1  →  register  →  promote (uncontested)
+                      →  api up
+```
+
+The README's one-command claim is scoped to "after bootstrap." `docker compose up`
+remains the steady-state story. Also: **never `docker compose down -v`** as a routine
+check — it deletes named volumes, and run from the wrong directory it deletes another
+project's. Likewise never `docker system prune -a` or `docker image prune -a` on this
+machine.
+
+### A6 — Training and serving snapshot policies differ *(severity: medium)*
+
+**Defect.** Training joins each order to its *own* purchase-month snapshot; serving uses
+the *single latest* snapshot bundled in the artifact. "The API matches the training
+pipeline" was therefore undefined — feed a historical order and the two paths legitimately
+disagree.
+
+**Resolution.** Parity is a property of an artifact, not of history:
+
+> **same raw record + same artifact → same probability within 1e-6**
+
+Snapshot *selection* is explicitly outside parity's scope. The training-versus-serving
+asymmetry is intentional and is how batch feature systems behave — §4.5 already argues
+this — but it is a genuine distribution shift and belongs in the limitations section, not
+papered over. If historical scoring is ever needed, the pyfunc takes an optional as-of
+date and defaults to latest; that is out of scope for v1.
+
+### A7 — Library versions moved a major release *(severity: low, but pervasive)*
+
+Resolved fresh on 2026-09-28 per §11's own instruction not to pin versions from this
+document. All 117 packages install as binary wheels on Python 3.12 — no source builds.
+
+| | plan assumed | resolves to | consequence |
+|---|---|---|---|
+| Python | 3.11 | **3.12.3** | one interpreter everywhere; a `pip freeze` lockfile is only valid for the interpreter that made it |
+| MLflow | 2.16+ | **3.16.1** | stages *removed*, so §7's alias design is the only option; `log_model(name=)` replaces `artifact_path=` |
+| pandas | 2.x | **3.0.6** | copy-on-write mandatory, PyArrow-backed strings default — write CoW-correct code from the start, retrofitting is miserable |
+| Optuna | 3.x | 5.0.0 | API stable for `timeout`, TPE, pruners |
+| numpy / pytest | — | 2.5.3 / 9.1.1 | no action |
+
+MLflow 3 strengthens the narrative rather than weakening it: stages being gone makes the
+champion/challenger alias design mandatory rather than merely current.
+
+### Not changed
+
+The architecture, scope boundaries, §3 cut-order, model selection, MLflow run structure,
+CI/CD design and §12 repository layout all survived review unaltered. None of these
+findings challenged the design; they are corrections within it.
