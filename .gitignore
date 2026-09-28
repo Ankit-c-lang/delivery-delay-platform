@@ -1,0 +1,7 @@
+# Interim safety net — Phase 0 replaces this with the full version (PLAN.md §12).
+# Purpose: make it impossible to stage the CC BY-NC-SA Olist data or secrets.
+data/
+.venv/
+.env
+__pycache__/
+kaggle.json
