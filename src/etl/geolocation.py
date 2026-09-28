@@ -136,6 +136,10 @@ def build_centroid_tables(conn: Connection) -> dict[str, int]:
         conn.execute(text(f"DROP TABLE IF EXISTS {qualified}"))
         conn.execute(text(sql), bounds)
         conn.execute(text(f"ALTER TABLE {qualified} ADD PRIMARY KEY ({key})"))
+        # These tables are created and joined inside the same transaction, so autovacuum
+        # never gets a chance to analyze them. Without statistics the planner assumes they
+        # are tiny and picks nested loops against the 96 k-row order side.
+        conn.execute(text(f"ANALYZE {qualified}"))
         counts[table] = conn.execute(text(f"SELECT count(*) FROM {qualified}")).scalar_one()
         logger.info("%-28s %7d rows", qualified, counts[table])
 

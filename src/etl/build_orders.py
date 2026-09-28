@@ -472,6 +472,7 @@ def build() -> dict[str, object]:
             logger.info("funnel  %-42s %7d", label, count)
 
         conn.execute(text(STAGE_SQL), params)
+        conn.execute(text(f"ANALYZE {STAGE_TABLE}"))
         staged = pd.read_sql(text(f"SELECT * FROM {STAGE_TABLE}"), conn)
         logger.info("Staged %d rows, %d columns", len(staged), staged.shape[1])
 

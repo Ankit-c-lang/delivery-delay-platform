@@ -14,7 +14,58 @@ are*. Decisions and their reasons live in `DECISIONS.md`.
 
 ## Currently working on
 
-**Nothing in flight.** Phase 2 is complete and verified.
+**Nothing in flight.** Phase 2 is complete, and a pre-push audit of Phases 0-2 has been run.
+
+### Pre-push audit (2026-09-28) — two real defects found and fixed
+
+**1. A first-run performance bug that would have looked like a hang.** The whole ETL was run
+into a freshly created, empty database to test reproducibility. `load_raw` was fine, but the
+Phase 2 staging query ran **over 833 s before being cancelled**, against ~12 s in the working
+database — same code, same data. Cause: the centroid tables are created *and joined* inside one
+transaction, so autovacuum can never analyze them, and with no statistics the planner chose
+nested loops against 96,203 rows. The working database only looked fast because earlier
+committed runs had left statistics behind. **This is exactly the `make bootstrap` path (§18
+A5)**, so the slow run was the one nobody would have measured. Fixed with an explicit `ANALYZE`
+after every bulk load; from-scratch build is now **16.1 s**, whole ETL **21.6 s**. See
+`DECISIONS.md` D21, including an honest caveat about memory pressure during the measurement.
+
+**2. A `git filter-branch` backup ref was never deleted.** `refs/original/refs/heads/main`
+still pointed at the pre-rewrite history, keeping two commits with `Co-Authored-By` trailers
+alive **locally**. They were unreachable from `main` and the remote only ever had
+`refs/heads/main` — re-verified trailer-free — so nothing wrong was published. Ref deleted;
+`main`'s commit and tree hashes are unchanged. Orphaned objects remain in the object database
+until a future `gc`; pruning them was declined as irreversible and is not needed, since `git
+push` only sends objects reachable from the ref being pushed.
+
+### What the audit verified as sound
+
+| Check | Result |
+|---|---|
+| Reproducibility from an empty database | `features.orders_analytical` and `order_outcomes` are **md5-identical** to the working database; all 9 raw tables match too |
+| Transaction boundary | the cancelled 833 s run rolled back with **no** `features` table left behind |
+| Attribution | **zero** `Co-Authored-By` trailers reachable from any ref, local or remote |
+| Secrets and data | nothing under `data/`, no `.env`, no `kaggle.json` tracked; a fresh clone carries no CSVs |
+| Fresh clone completeness | all 19 files the phases need are present; `scripts/download_data.py` exits 1 with instructions |
+| Doc accuracy | every number in `CLAUDE.md`, `PROGRESS.md` and `DECISIONS.md` matches the live database |
+| `requirements.txt` / `-api.txt` | both resolve cleanly (exit 0), all wheels — closes the "never installed" gap for **resolution** |
+| Python version | 3.12 everywhere, no strays |
+| Leftover markers | no TODO / FIXME / XXX / HACK in source |
+| Tests | 80 collected — 37 unit, 43 needing Postgres or the dataset; all pass |
+| Sibling project | all 3 `realtime-fraud-detection` containers still up, image and volume intact |
+
+### Two findings carried forward
+
+- **`xgboost` pulls a 305 MB CUDA library.** A dry-run resolve of `requirements-api.txt` brings
+  in `nvidia-nccl-cu13` (measured: 305.1 MB) on a CPU-only machine. `xgboost-cpu` is the slim
+  alternative. **Phase 8 must measure the image both ways** before repeating the "skinny MLflow
+  roughly halves it" claim — see `DECISIONS.md` D14.
+- **`raw.geolocation` contains 261,831 exact duplicate rows** (26% of 1,000,163). Harmless for a
+  median centroid, and it explains why an `ORDER BY` over only 3 of its 5 columns gives an
+  unstable checksum. Worth knowing before anyone builds a per-prefix count feature.
+
+---
+
+Phase 2 itself:
 
 `features.orders_analytical` holds **96,203 rows, 38 columns, one row per order**, built in
 **12.5 s**. The `is_late` rate is **6.79%**, inside §4.3's 5-10% band. Pandera passes with
@@ -108,8 +159,8 @@ future outcomes and the leak favours the positive class.
 - The warm-up window 2017-01 → 04 (7,252 orders) exists so 2017-05 already has four months of
   *resolved* history. Those rows are aggregate input only, never training rows.
 
-**Start of session:** `make up`, then `make etl` if the volume is fresh (about 17 s end to
-end). Credentials are already in `.env`.
+**Start of session:** `make up`, then `make etl` if the volume is fresh (**21.6 s** from an
+empty database, measured). Credentials are already in `.env`.
 
 ---
 
@@ -242,7 +293,7 @@ module's docstring so nobody relies on the wrong guard.
 | 5 | Ensemble, calibration, threshold | 4 h | medium | ⚠️ base-rate shift (D20); fixes whether CatBoost must re-enter `requirements-api.txt` (D14) |
 | 6 | MLflow, pyfunc wrapper, registry | 4 h | medium | |
 | 7 | FastAPI and the parity test | 4 h | medium | ⚠️ read §18 A3, A6 first |
-| 8 | Docker and Compose | 3 h | medium | ⚠️ read §18 A5 first · validate `mlflow-skinny` (D14) |
+| 8 | Docker and Compose | 3 h | medium | ⚠️ read §18 A5 first · validate `mlflow-skinny` **and** the 305 MB CUDA dependency (D14) |
 | 9 | Retraining lifecycle and promotion gate | 3.5 h | medium | ⚠️ read §18 A2 first; set the Brier tolerance against D20 |
 | 10 | Full CI/CD | 3 h | medium | CI gains pytest + Postgres service container |
 | 11 | Documentation and interview prep | 2.5 h | easy | |

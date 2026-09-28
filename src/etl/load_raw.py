@@ -422,6 +422,17 @@ def load_all(
                 f"Row counts disagree for {mismatched}; rolling back the entire load."
             )
 
+        # ANALYZE inside the transaction, explicitly. Without it the planner has no column
+        # statistics for tables it has only just seen written, and autovacuum cannot help:
+        # it runs outside this transaction and may not have finished by the time Phase 2's
+        # join starts. Measured consequence of leaving it out: the first-ever
+        # build_orders on a clean database took over 14 minutes against ~12 s warm.
+        # This is the `make bootstrap` path (§18 A5), so first-run cost is the one that
+        # matters most.
+        for spec in SPECS:
+            conn.execute(text(f"ANALYZE {spec.qualified}"))
+        logger.info("ANALYZEd %d tables so the planner has statistics", len(SPECS))
+
     return results
 
 

@@ -28,6 +28,7 @@ duplicated** — §18 is the authority, and two copies would drift apart.
 | [D18](#d18) | The `raw` schema is a faithful landing zone | 2026-09-28 |
 | [D19](#d19) | Quarantine `order_delivered_customer_date` in `features.order_outcomes` | 2026-09-28 |
 | [D20](#d20) | The late rate is strongly non-stationary across the §4.4 windows | 2026-09-28 |
+| [D21](#d21) | `ANALYZE` explicitly after every bulk load | 2026-09-28 |
 
 ---
 
@@ -262,6 +263,13 @@ number is the whole justification. Both caveats are written into
 **Rejected.** `mlflow` in all three files (simpler, but then the API image carries the
 training stack and the §11 claim is false). One requirements file with extras.
 
+**Measured later, and it undercuts the "halves the image" claim:** a dry-run resolve of
+`requirements-api.txt` pulls `nvidia-nccl-cu13`, a **305 MB** CUDA collective-communications
+library, as a dependency of `xgboost`. This machine is CPU-only (i5-1235U, integrated
+graphics), so it is 305 MB of code that can never execute. `xgboost-cpu` is the published
+slim wheel. **Phase 8 must measure the image with and without it** before repeating any
+size claim — skinny MLflow saves far less than one unusable CUDA library costs.
+
 ## D15
 ### `Makefile` and pre-commit added in Phase 0, with Phase 0 targets only
 **Decision.** Created `Makefile` and `.pre-commit-config.yaml`, and installed the git hook.
@@ -446,3 +454,40 @@ retraining cadence faces exactly this.
   stationarity.
 - *Phase 11:* this is the honest answer to "how would you know your model had drifted?" —
   the drift is already in the training data.
+
+## D21
+### `ANALYZE` explicitly after every bulk load, inside the transaction
+**Decision.** `load_raw` runs `ANALYZE` on all nine raw tables after the COPYs;
+`build_centroid_tables` analyzes each centroid table right after creating it; `build_orders`
+analyzes the staging table. All inside the existing transaction.
+
+**Why — measured, not theorised.** A pre-push audit ran the whole ETL into a freshly created,
+genuinely empty database. `load_raw` was fine at 4.5 s, but the Phase 2 staging query ran for
+**over 833 seconds before being cancelled**, against ~12 s in the working database. Same code,
+same data, same machine.
+
+The cause is statistics timing. `features.zip_centroids` and `features.state_centroids` are
+created *and joined* inside one transaction, so autovacuum can never analyze them — it runs
+outside the transaction and cannot see uncommitted tables. With no column statistics the
+planner assumes they are tiny and chooses nested loops against the 96,203-row order side. The
+working database only looked fast because earlier committed runs had left usable statistics
+behind; the very first run on a clean machine was the slow one, and it is the run nobody would
+have measured.
+
+**After the fix:** build_orders on an empty database takes **16.1 s**, and the whole ETL
+(`load_raw` + `build_orders`) takes 21.6 s from nothing.
+
+**Why it matters more than a speed number.** This *is* the `make bootstrap` path §18 A5
+defines for a clean machine. A first run that appears to hang for a quarter of an hour looks
+like a broken pipeline, and the natural reaction — killing it and rewriting the query — would
+have chased the wrong problem entirely.
+
+**Honest caveat.** The 833 s measurement was taken while a 305 MB wheel download and a full
+dependency dry-run were competing for page cache on a 7.7 GB machine, so memory pressure
+inflated it to an unknown degree. The fix is correct regardless: an explicit `ANALYZE` after a
+bulk load is standard practice, it removes the dependence on autovacuum timing entirely, and
+the post-fix 16.1 s was measured on an equally empty database.
+
+**Rejected.** Committing between the load and the join so autovacuum can run (gives up the
+all-or-nothing transaction, which is the property two tests exist to protect). `SET
+enable_nestloop = off` (treats the symptom and distorts every other plan in the statement).
