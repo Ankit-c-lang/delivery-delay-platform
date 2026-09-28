@@ -8,7 +8,7 @@ PY := .venv/bin/python
 COMPOSE := docker compose -f docker-compose.yml
 
 .DEFAULT_GOAL := help
-.PHONY: help lint format test up down stop ps logs psql health
+.PHONY: help lint format test test-unit up down stop ps logs psql health check-data load-raw
 
 help: ## List available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -22,8 +22,11 @@ format: ## Apply ruff --fix and black
 	$(PY) -m ruff check --fix .
 	$(PY) -m black .
 
-test: ## pytest with coverage
+test: ## pytest with coverage (needs `make up` and the real dataset)
 	$(PY) -m pytest
+
+test-unit: ## Only tests that need neither Postgres nor the dataset (what CI runs)
+	$(PY) -m pytest -m "not integration and not slow"
 
 up: ## Start postgres + mlflow, wait for both to report healthy
 	$(COMPOSE) up -d --wait postgres mlflow
@@ -46,3 +49,11 @@ psql: ## Open a psql shell inside the postgres container (no host client needed)
 
 health: ## Print the health state of both services
 	@$(COMPOSE) ps --format '{{.Service}}\t{{.State}}\t{{.Status}}'
+
+# --- Phase 1 -------------------------------------------------------------------
+
+check-data: ## Verify the 9 Olist CSVs are present and their headers match the loader
+	$(PY) -m scripts.download_data
+
+load-raw: ## Load the 9 CSVs into the postgres `raw` schema. Idempotent: truncates first.
+	$(PY) -m src.etl.load_raw

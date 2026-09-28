@@ -24,6 +24,8 @@ duplicated** — §18 is the authority, and two copies would drift apart.
 | [D14](#d14) | `requirements-dev.txt` standalone; `mlflow-skinny` for the API subset | 2026-09-28 |
 | [D15](#d15) | Added `Makefile` and pre-commit in Phase 0, with Phase 0 targets only | 2026-09-28 |
 | [D16](#d16) | Pin the CI runner OS and the action majors | 2026-09-28 |
+| [D17](#d17) | Raw timestamps are `TIMESTAMP`, never `TIMESTAMPTZ` | 2026-09-28 |
+| [D18](#d18) | The `raw` schema is a faithful landing zone | 2026-09-28 |
 
 ---
 
@@ -302,3 +304,68 @@ Pinning the actions to full SHAs — right for a public repo handling secrets, o
 private repo running a linter, and it makes upgrades invisible.
 
 **Cost.** The pin needs revisiting when 24.04 is retired. Noted here so it is not a mystery.
+
+## D17
+### Raw timestamps are `TIMESTAMP`, never `TIMESTAMPTZ`
+**Decision.** All eight timestamp columns in the `raw` schema are `TIMESTAMP` (without time
+zone). A test asserts that no `timestamptz` column exists anywhere in the schema.
+
+**Why.** The Olist CSVs carry naive local times with no offset — there is nothing to convert
+*from*. `TIMESTAMPTZ` would make Postgres interpret each string in the session `TimeZone`,
+store a UTC instant, and shift it back on read according to whatever the *client's* zone is.
+Because `order_estimated_delivery_date` is always exactly midnight (verified: 0 of 99,441
+values are non-midnight), any shift crosses a date boundary, and §4.3 compares at date
+granularity. Demonstrated in the live database rather than argued:
+
+```
+-- one row: delivered 2017-10-18 20:30, estimated 2017-10-18 (midnight)
+-- stored once as timestamp and once as timestamptz, read back in Asia/Kolkata:
+ is_late_naive | is_late_tz
+---------------+------------
+ f             | t
+```
+
+The same row is on-time under `TIMESTAMP` and late under `TIMESTAMPTZ`. The target would then
+depend on the reader's timezone — different in a container, in CI, and on a laptop — and
+nothing would error.
+
+**Rejected.** `TIMESTAMPTZ` "because it is generally the better type". It is, for data that
+records an instant with a known offset. This data records neither. Also rejected: typing
+`order_estimated_delivery_date` as `DATE` in raw. It *is* date-only, but raw must mirror the
+file; Phase 2 casts both sides of the comparison instead.
+
+## D18
+### The `raw` schema is a faithful landing zone
+**Decision.** `raw` mirrors the CSVs and nothing more. Specifically:
+
+| Choice | Rule | Evidence |
+|---|---|---|
+| Table names | `olist_` prefix and `_dataset` suffix stripped: `raw.orders`, `raw.order_items` | cosmetic, and the file name is recorded in the spec |
+| Column names | **exactly** as shipped, typos included (`product_name_lenght`) | renaming breaks reconciliation against the file |
+| Strings | `TEXT` everywhere, no `VARCHAR(n)` | Postgres gains nothing from a length cap; a cap only rejects a future refresh |
+| `*_zip_code_prefix` | `TEXT` | 24.13% of customer, 33.18% of seller, 24.57% of geolocation prefixes start with `0` |
+| Money | `NUMERIC(10, 2)` | `price`, `freight_value`, `payment_value` are 2dp throughout, max 5 integer digits |
+| Coordinates | `DOUBLE PRECISION` | measurements, not money; source carries up to 20 spurious decimals |
+| Nullability | measured per column, never assumed | e.g. `order_approved_at` 160 nulls, `product_photos_qty` 610, `review_comment_title` 87,656 |
+| Primary keys | only where verified unique and non-null | `order_reviews` is keyed `(review_id, order_id)` because `review_id` alone has **814 duplicates**; `geolocation` has **no** key — 19,015 prefixes over 1,000,163 rows |
+| Foreign keys | none | a landing zone must accept the file as it is |
+| Header guard | the CSV header must equal the spec, in order, before any data moves | `COPY` matches by **position**, so a re-download with two columns swapped would load `freight_value` into `price` silently |
+
+Loads run as `TRUNCATE` + `COPY FROM STDIN` inside **one** transaction for all nine files, so
+a failure on the ninth rolls back the first eight. Two tests prove this by symlinking eight
+files into a temp directory and omitting or corrupting the ninth.
+
+`reports/raw_load_reconciliation.md` is committed (a `.gitignore` exception): it is evidence
+the load is complete, a cloner cannot regenerate it without the non-committable dataset, and
+it contains counts rather than data.
+
+**Rejected.** `pandas.read_csv` + `to_sql` — type inference mangles zip prefixes, and
+`to_sql` on 1,000,163 geolocation rows is orders of magnitude slower than `COPY` (the whole
+load is 4.1 s). Cleaning in `raw` — then there is nowhere to look when a value is
+questioned. Literal hand-written DDL strings — generating from a spec keeps the
+`CREATE TABLE` column order, the `COPY` column list and the header check in sync, which is
+the actual failure mode worth defending against.
+
+**Data-quality findings for Phase 2**, recorded in `PROGRESS.md` rather than here: 8 rows are
+`delivered` with no delivery date, 6 `canceled` rows have one, and `order_estimated_delivery_date`
+is midnight in all 99,441 rows.

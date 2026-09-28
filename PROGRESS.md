@@ -5,69 +5,74 @@ that task. Source of truth for *what* to build is `PLAN.md`; this file only trac
 are*. Decisions and their reasons live in `DECISIONS.md`.
 
 - **Plan version:** v1 (2026-09-28) + amendments §18 · **Pre-flight completed:** 2026-09-28
-- **Current phase:** Phase 0 — Skeleton and environment (PLAN §13, Phase 0) · **✅ COMPLETE
-  — 8 / 8 items, local verification green, CI green on the first push**
-- **Overall:** 1 / 12 phases · pre-flight and environment complete (not counted as a phase)
-- **Estimated remaining:** ~39.5 h of build work (PLAN §3 budget: 36-42 h)
+- **Current phase:** Phase 1 — Raw load into Postgres · **✅ COMPLETE** — 9 tables,
+  1,550,922 rows, 33 tests green
+- **Overall:** 2 / 12 phases · pre-flight and environment complete (not counted as a phase)
+- **Estimated remaining:** ~37 h of build work (PLAN §3 budget: 36-42 h)
 
 ---
 
 ## Currently working on
 
-**Nothing in flight.** Phase 0 is built and verified locally.
+**Nothing in flight.** Phase 1 is complete and verified.
 
-All eight prompt items exist, `ruff check` and `black --check` pass on 8 Python files, and
-both containers reached `healthy` on the first `up` — 21 seconds from create to healthy, no
-retries burnt. `src/db.py` was exercised against the live database, not just linted: it
-connects as `delay` to Postgres 16.15 and masks the password in both `repr()` and the log
-line. `configs/splits.yaml` was checked programmatically — for both versions the fit,
-calibrate and promotion-evaluation windows are pairwise disjoint and `aggregates_through`
-matches the calibrate end (§18 A2).
+All nine CSVs load into the `raw` schema in **4.1 s**, 1,550,922 rows, and every table
+reconciles exactly against a CSV-parser count. `make load-raw` run three times in a row gives
+identical counts. 33 tests pass (11 of them pure unit tests that need neither Postgres nor the
+dataset, so they will run in CI from Phase 10). Coverage 88% overall, 85% on `load_raw.py`;
+the gap is the CLI entry point and the `--recreate` branch, both exercised by hand.
 
-**One deliberate scope addition, flagged for approval:** `Makefile` and
-`.pre-commit-config.yaml`. Both are named in `PLAN.md` (§12 tree and the Phase 0 *Tasks*
-line respectively) but neither appears in Phase 0's numbered prompt. See `DECISIONS.md` D15.
+**One test of mine was wrong and got fixed, not worked around.** The `wc -l` trap test used
+`sum(1 for _ in open(path))`, which yields the final newline-less line as a line and so
+reported 71 where `wc -l` reports 70. Python's line iterator and `wc -l` genuinely disagree on
+files with no trailing newline — and all nine Olist files lack one. Replaced with an explicit
+newline-byte count plus a unit test pinning that helper's behaviour, so the two row-count
+tests keep comparing like with like.
 
-**Partial dependency install.** Only `requirements-dev.txt` plus five core packages
-(`sqlalchemy`, `psycopg2-binary`, `pydantic`, `pydantic-settings`, `pyyaml`) are installed —
-enough to lint and to actually run `src/db.py`. The full ~3 GB training stack waits for
-Phase 4, and `requirements.lock.txt` waits with it, since a lockfile from a partial install
-would be a lie.
+---
 
-### CI
+## Data-quality findings, for Phase 2
 
-**Green on the first push** — run `36430031887`, job `ruff + black`, 17 s, `conclusion=success`.
-It did raise two warning annotations, both now fixed (D16): `ubuntu-latest` migrates to Ubuntu
-26 on 2026-10-19, and `actions/checkout@v4` / `setup-python@v5` still declare Node 20. Now
-pinned to `ubuntu-24.04` with both actions at v7, so CI matches the dev VM on base OS as well
-as interpreter.
+Measured against the real files, before writing any DDL. These matter for §4.3's population
+filter and §4.5's snapshot rule:
 
-### Not yet verified
-
-- `requirements.txt` and `requirements-api.txt` have never been installed, so neither is
-  proven resolvable as written. `requirements-api.txt` in particular names `mlflow-skinny`
-  (D14) which Phase 8 must validate against a real pyfunc load.
+| Finding | Count | Consequence |
+|---|---|---|
+| `order_status = 'delivered'` but `order_delivered_customer_date IS NULL` | **8** | §4.3's filter needs **both** conditions, not just the status |
+| `order_status = 'canceled'` but delivery date **present** | **6** | filtering on the date alone is also not enough |
+| `order_estimated_delivery_date` is exactly midnight | **99,441 / 99,441** | it is date-only; §4.3 must cast both sides to `date` or nearly every same-day delivery reads as late |
+| `review_id` duplicates | **814** | reviews are keyed `(review_id, order_id)`; one review can cover several orders |
+| `product_category_name` NULL in products | **610** | join to the translation table must tolerate it |
+| Order status mix | 97.02% delivered, 1.11% shipped, 0.63% canceled | the funnel §4.3 asks for in the README starts here |
+| Purchase span | 2016-09-04 → 2018-10-17 | §4.4 drops everything outside 2017-01-01 → 2018-08-31 |
+| Categories in products vs translation | 73 non-null distinct vs 71 rows | **2 categories have no English translation**: `pc_gamer` and `portateis_cozinha_e_preparadores_de_alimentos`. A plain inner join silently drops them — Phase 2 must left-join and decide the fallback |
 
 ---
 
 ## Next up (in order)
 
-**Phase 1 — Raw load into Postgres** (PLAN §13 Phase 1, ~2.5 h, easy-medium).
+**Phase 2 — Transform, validate, analytical table** (PLAN §13 Phase 2, ~4 h, medium).
 
-1. `src/etl/load_raw.py` — the 9 Olist CSVs into the `raw` schema via `COPY FROM STDIN`
-2. `src/etl/schema.py` — Pandera contracts for each raw table
-3. A row-count reconciliation report, CSV against table
-4. `tests/test_etl_load_raw.py`
+Read `PLAN.md` §4.2, §4.3 and §13 Phase 2 first. §4.2 and §4.5 changed materially in the
+§18 amendment.
 
-**Carry into Phase 1:** expected row counts must come from a CSV parser, never `wc -l`.
-`olist_order_reviews_dataset.csv` is **99,224** rows (not 104,719 — embedded newlines in
-quoted review text) and `product_category_name_translation.csv` is **71** (not 70 — no
-trailing newline). `csv.field_size_limit` may need raising for the reviews file. See
-`DECISIONS.md` D7. Getting this wrong makes the reconciliation test fail spuriously, and the
-tempting "fix" is to break the loader to match a wrong number.
+**Carry into Phase 2:** the findings table above, and in particular:
+- `is_late` compares at **date** granularity on both sides (§4.3). The positive rate must
+  land in 5-10%; outside that band means the granularity bug, not a discovery.
+- The population filter needs `order_status = 'delivered'` **and**
+  `order_delivered_customer_date IS NOT NULL` — 8 rows satisfy the first but not the second,
+  and 6 satisfy the second but not the first.
+- Log how many rows each filter drops and keep the funnel; the README wants it.
+- `src/etl/schema.py` (Pandera contracts) was listed under Phase 1 in an earlier reading of
+  the plan but belongs with the transform, which is where validation has something to assert.
+  It is **not** yet written.
 
-**Start of session:** `make up` (both services), then read `CLAUDE.md` and `PLAN.md` §13
-Phase 1. Credentials are already in `.env`.
+**Deferred from Phase 1, deliberately:** `src/etl/geolocation.py` (zip prefix → centroid) is
+a Phase 2 item per §12. `raw.geolocation` has no index; a 1 M-row sequential scan is cheap,
+so Phase 2 should add one only if it measures a need.
+
+**Start of session:** `make up`, `make check-data`, then `make load-raw` if the volume is
+fresh. Credentials are already in `.env`.
 
 ---
 
@@ -131,6 +136,31 @@ owned by `ankit`, not `root`.
 `fraud-app:local` 4.65 GB and `realtime-fraud-detection_redis-data` both still present. No
 prune of any kind was run; the only new volume is `delay-prediction-pgdata`.
 
+### Phase 1 — Raw load into Postgres — ✅ COMPLETE (2026-09-28)
+
+| # | Item | Verified by |
+|---|---|---|
+| 1 | `src/etl/load_raw.py` — explicit DDL per table, `COPY FROM STDIN`, idempotent, one transaction | 9/9 tables reconcile; 3 consecutive runs give identical counts |
+| 2 | `scripts/download_data.py` — presence + header check, non-zero exit, no scraping | `make check-data` passes; reports 126 MB across 9 files |
+| 3 | `tests/test_etl_load_raw.py` + `tests/conftest.py` | 33 tests, 88% coverage |
+| 4 | `make load-raw` (plus `check-data`, `test-unit`) | run from a clean start and twice more |
+
+**Row counts, all reconciled three ways** (CSV parser = Postgres = Olist's published figures):
+orders 99,441 · customers 99,441 · order_items 112,650 · order_payments 103,886 ·
+order_reviews **99,224** · products 32,951 · sellers 3,095 · geolocation 1,000,163 ·
+product_category_name_translation **71**. Report: `reports/raw_load_reconciliation.md`
+(committed on purpose — a cloner cannot regenerate it without the dataset).
+
+**Verified in the database, not just asserted in code:** all 8 timestamp columns are
+`timestamp without time zone`; leading zeros survive (23,995 / 1,027 / 245,733 prefixes start
+with `0`); 3,852 review comments keep their embedded newlines; the UTF-8 BOM on the
+translation file never reached a value; nulls landed as NULL with **zero** empty strings;
+money is `numeric(10,2)`; 8 primary keys exist and `geolocation` correctly has none.
+
+**The `TIMESTAMPTZ` trap was demonstrated, not assumed** — the same row reads as on-time under
+`TIMESTAMP` and late under `TIMESTAMPTZ` when the client timezone changes. See `DECISIONS.md`
+D17.
+
 ---
 
 ## Remaining work
@@ -138,8 +168,8 @@ prune of any kind was run; the only new volume is `delay-prediction-pgdata`.
 | Phase | Title | Est. | Difficulty | Status |
 |---|---|---|---|---|
 | 0 | Skeleton and environment | 1.5 h | easy | ✅ **complete** · CI green |
-| 1 | Raw load into Postgres | 2.5 h | easy-med | **next** · use parser row counts (D7) |
-| 2 | Transform, validate, analytical table | 4 h | medium | |
+| 1 | Raw load into Postgres | 2.5 h | easy-med | ✅ **complete** · 33 tests |
+| 2 | Transform, validate, analytical table | 4 h | medium | **next** · §4.3 date granularity; Pandera contracts land here |
 | 3 | As-of aggregates and feature assembly | 5 h | **hardest** | ⚠️ read §18 A1 first |
 | 4 | Baselines and single models | 4 h | medium | full dependency install lands here |
 | 5 | Ensemble, calibration, threshold | 4 h | medium | fixes whether CatBoost must re-enter `requirements-api.txt` (D14) |
