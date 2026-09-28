@@ -5,33 +5,64 @@ that task. Source of truth for *what* to build is `PLAN.md`; this file only trac
 are*. Decisions and their reasons live in `DECISIONS.md`.
 
 - **Plan version:** v1 (2026-09-28) + amendments §18 · **Pre-flight completed:** 2026-09-28
-- **Current phase:** Phase 1 — Raw load into Postgres · **✅ COMPLETE** — 9 tables,
-  1,550,922 rows, 33 tests green
-- **Overall:** 2 / 12 phases · pre-flight and environment complete (not counted as a phase)
-- **Estimated remaining:** ~37 h of build work (PLAN §3 budget: 36-42 h)
+- **Current phase:** Phase 2 — Transform, validate, analytical table · **✅ COMPLETE** —
+  96,203 orders, `is_late` 6.79%, Pandera green, 80 tests green
+- **Overall:** 3 / 12 phases · pre-flight and environment complete (not counted as a phase)
+- **Estimated remaining:** ~33 h of build work (PLAN §3 budget: 36-42 h)
 
 ---
 
 ## Currently working on
 
-**Nothing in flight.** Phase 1 is complete and verified.
+**Nothing in flight.** Phase 2 is complete and verified.
 
-All nine CSVs load into the `raw` schema in **4.1 s**, 1,550,922 rows, and every table
-reconciles exactly against a CSV-parser count. `make load-raw` run three times in a row gives
-identical counts. 33 tests pass (11 of them pure unit tests that need neither Postgres nor the
-dataset, so they will run in CI from Phase 10). Coverage 88% overall, 85% on `load_raw.py`;
-the gap is the CLI entry point and the `--recreate` branch, both exercised by hand.
+`features.orders_analytical` holds **96,203 rows, 38 columns, one row per order**, built in
+**12.5 s**. The `is_late` rate is **6.79%**, inside §4.3's 5-10% band. Pandera passes with
+`strict=True`. 80 tests pass, 89% coverage; 37 of them are unit tests needing neither Postgres
+nor the dataset.
 
-**One test of mine was wrong and got fixed, not worked around.** The `wc -l` trap test used
-`sum(1 for _ in open(path))`, which yields the final newline-less line as a line and so
-reported 71 where `wc -l` reports 70. Python's line iterator and `wc -l` genuinely disagree on
-files with no trailing newline — and all nine Olist files lack one. Replaced with an explicit
-newline-byte count plus a unit test pinning that helper's behaviour, so the two row-count
-tests keep comparing like with like.
+**The design question Phase 2 forced, and how it was resolved.** Phase 2's prompt says to drop
+every §4.2 denylist column, but §18 A1 rewrote §4.5 to filter snapshots on
+`order_delivered_customer_date` — so Phase 3 needs a column Phase 2 was told to destroy. That
+is an A1 consequence the amendment never propagated into Phase 2's prompt. Resolved by
+quarantining the column in a separate two-column table, `features.order_outcomes`, leaving
+`orders_analytical` genuinely denylist-free and `strict=True` truthfully enforceable. Full
+reasoning and the two rejected alternatives are in `DECISIONS.md` D19, and it is now
+`CLAUDE.md` invariant 12.
+
+**Division of labour:** SQL does the set-based aggregation (a join across 1.55 M raw rows),
+pandas computes the great-circle distance and holds the frame for validation. The distance uses
+`src.etl.geolocation.haversine_km` rather than a second formula in SQL, so the function the
+tests exercise is the function that runs.
 
 ---
 
-## Data-quality findings, for Phase 2
+## A finding that changes Phases 5 and 9
+
+The late rate is **strongly non-stationary**, and both calibration windows sit at roughly
+2.2-2.7x the base rate of the window both models are judged on:
+
+| Window | Orders | Late rate |
+|---|---:|---:|
+| v1 fit 2017-05 → 12 | 36,174 | 5.85% |
+| **v1 calibrate** 2018-01 → 02 | 13,624 | **9.75%** |
+| v2 fit 2017-05 → 2018-02 | 49,798 | 6.92% |
+| **v2 calibrate** 2018-03 → 04 | 13,801 | **11.84%** |
+| **promotion evaluation** 2018-05 → 08 | 25,352 | **4.40%** |
+
+Monthly extremes are 18.96% (2018-03) and 1.16% (2018-06) — a 16-fold spread. November 2017
+at 12.40% is the Black Friday spike §4.4 predicts.
+
+**Consequence:** isotonic calibration fitted at a ~10-12% prior will over-predict on a 4.4%
+evaluation set, and a threshold swept on the calibration window will be too low there. Phase 5
+will see a poor Brier score on the evaluation set and the cause will not be the code. The
+promotion gate itself is unaffected — champion and challenger are scored on the *same* set, so
+the shift cancels — but the absolute Brier tolerance must be set with these numbers in mind.
+The split boundaries were **not** moved to flatten this; see `DECISIONS.md` D20.
+
+---
+
+## Data-quality findings, carried from Phase 1
 
 Measured against the real files, before writing any DDL. These matter for §4.3's population
 filter and §4.5's snapshot rule:
@@ -51,28 +82,34 @@ filter and §4.5's snapshot rule:
 
 ## Next up (in order)
 
-**Phase 2 — Transform, validate, analytical table** (PLAN §13 Phase 2, ~4 h, medium).
+**Phase 3 — As-of aggregates and feature assembly** (PLAN §13 Phase 3, ~5 h, **the hardest
+phase**).
 
-Read `PLAN.md` §4.2, §4.3 and §13 Phase 2 first. §4.2 and §4.5 changed materially in the
-§18 amendment.
+**Read `PLAN.md` §18 A1 before writing a line of it.** The original snapshot rule leaked
+future outcomes and the leak favours the positive class.
 
-**Carry into Phase 2:** the findings table above, and in particular:
-- `is_late` compares at **date** granularity on both sides (§4.3). The positive rate must
-  land in 5-10%; outside that band means the granularity bug, not a discovery.
-- The population filter needs `order_status = 'delivered'` **and**
-  `order_delivered_customer_date IS NOT NULL` — 8 rows satisfy the first but not the second,
-  and 6 satisfy the second but not the first.
-- Log how many rows each filter drops and keep the funnel; the README wants it.
-- `src/etl/schema.py` (Pandera contracts) was listed under Phase 1 in an earlier reading of
-  the plan but belongs with the transform, which is where validation has something to assert.
-  It is **not** yet written.
+**Carry into Phase 3:**
+- Snapshots for month *M* admit only orders whose **delivery outcome** was known before *M*:
+  `order_delivered_customer_date < M`, never `order_purchase_timestamp < M`. Assert
+  `max(order_delivered_customer_date) < M` in a test (§6.6, §18 A1).
+- That column lives **only** in `features.order_outcomes`. Join it to `orders_analytical` on
+  `order_id`. Add the import-inspection guard so `order_outcomes` has exactly one reader, the
+  same way §18 A3 requires for the evaluation window (D19).
+- Entities are seller (`seller_id`), route (`route`, already built as
+  `seller_state->customer_state`) and product category (`dominant_category`). All three are in
+  `orders_analytical`.
+- Join each order to the snapshot for its own `purchase_month`, which is already a
+  first-of-month timestamp in the table.
+- Cold start: emit a `*_is_new` flag and fall back seller → seller state → global. Never
+  impute silently.
+- `days_to_shipping_limit` is stored **raw**, range 2.00 to 1052.00 days. Winsorize the tail
+  and audit near-collinearity with `promised_days` (§18 A4) — both are Phase 3's job.
+- 1,330 orders have no `dominant_category` and 16 no weight or volume. Handle explicitly.
+- The warm-up window 2017-01 → 04 (7,252 orders) exists so 2017-05 already has four months of
+  *resolved* history. Those rows are aggregate input only, never training rows.
 
-**Deferred from Phase 1, deliberately:** `src/etl/geolocation.py` (zip prefix → centroid) is
-a Phase 2 item per §12. `raw.geolocation` has no index; a 1 M-row sequential scan is cheap,
-so Phase 2 should add one only if it measures a need.
-
-**Start of session:** `make up`, `make check-data`, then `make load-raw` if the volume is
-fresh. Credentials are already in `.env`.
+**Start of session:** `make up`, then `make etl` if the volume is fresh (about 17 s end to
+end). Credentials are already in `.env`.
 
 ---
 
@@ -161,6 +198,36 @@ money is `numeric(10,2)`; 8 primary keys exist and `geolocation` correctly has n
 `TIMESTAMP` and late under `TIMESTAMPTZ` when the client timezone changes. See `DECISIONS.md`
 D17.
 
+### Phase 2 — Transform, validate, analytical table — ✅ COMPLETE (2026-09-28)
+
+| # | Item | Verified by |
+|---|---|---|
+| 1 | `src/etl/geolocation.py` — median zip centroid, state fallback, `haversine_km` | 19,011 zip + 27 state centroids; haversine checked against 4 known pairs and 1° = 111.195 km |
+| 2 | `src/etl/build_orders.py` — filter, aggregates, joins, target, funnel | 96,203 rows, one per order, `is_late` 6.79% |
+| 3 | `src/etl/schema.py` — Pandera contract, `strict=True`, raises on failure | passes on the built table; rejects a smuggled denylist column, a 100% rate, duplicate ids and a Portugal coordinate |
+| 4 | `tests/test_etl_build_orders.py` | 47 new tests (80 total), 89% coverage |
+| 5 | `make build-orders`, and `make etl` for the whole chain | run three times; identical counts and rate each time |
+
+**Funnel** (`reports/etl_funnel.md`, committed): 99,441 → 96,478 delivered (−2,963) → 96,470
+with a delivery date (−8) → **96,203** in window (−267). Kept 96.74%.
+
+**Verified in the database, not just asserted:** exactly 96,203 distinct `order_id`s for
+96,203 rows; **zero** denylist columns present; the state-centroid fallback fired 265 times for
+customers and 213 for sellers with **no** order left unresolved; same-state orders average
+153 km against 853 km cross-state; every coordinate inside the Brazil bounds;
+`days_to_shipping_limit` never below the 2.00-day floor §18 A4 measured.
+
+**The geolocation reduction earned its design.** Prefix `68275` (Porto Trombetas, Pará) has 9
+points: 4 correctly in Pará and 5 geocoded to **Portugal**, having matched "Porto". A mean
+lands in the Atlantic; a median over the unfiltered points still returns Portugal (41.15°N).
+Dropping the 31 out-of-Brazil points first moves it to −1.7435 — a ~4,800 km correction.
+Median then handles the 199 prefixes that remain noisy within Brazil.
+
+**A test of mine caught a real trap in the tests themselves:** the positive-rate band does
+**not** detect a fan-out join. Measured on the item-level fan-out the rate is 6.61%, still
+inside 5-10%. Only the one-row-per-order test catches it, which is now stated in the test
+module's docstring so nobody relies on the wrong guard.
+
 ---
 
 ## Remaining work
@@ -169,14 +236,14 @@ D17.
 |---|---|---|---|---|
 | 0 | Skeleton and environment | 1.5 h | easy | ✅ **complete** · CI green |
 | 1 | Raw load into Postgres | 2.5 h | easy-med | ✅ **complete** · 33 tests |
-| 2 | Transform, validate, analytical table | 4 h | medium | **next** · §4.3 date granularity; Pandera contracts land here |
-| 3 | As-of aggregates and feature assembly | 5 h | **hardest** | ⚠️ read §18 A1 first |
+| 2 | Transform, validate, analytical table | 4 h | medium | ✅ **complete** · 80 tests |
+| 3 | As-of aggregates and feature assembly | 5 h | **hardest** | **next** · ⚠️ read §18 A1 first |
 | 4 | Baselines and single models | 4 h | medium | full dependency install lands here |
-| 5 | Ensemble, calibration, threshold | 4 h | medium | fixes whether CatBoost must re-enter `requirements-api.txt` (D14) |
+| 5 | Ensemble, calibration, threshold | 4 h | medium | ⚠️ base-rate shift (D20); fixes whether CatBoost must re-enter `requirements-api.txt` (D14) |
 | 6 | MLflow, pyfunc wrapper, registry | 4 h | medium | |
 | 7 | FastAPI and the parity test | 4 h | medium | ⚠️ read §18 A3, A6 first |
 | 8 | Docker and Compose | 3 h | medium | ⚠️ read §18 A5 first · validate `mlflow-skinny` (D14) |
-| 9 | Retraining lifecycle and promotion gate | 3.5 h | medium | ⚠️ read §18 A2 first |
+| 9 | Retraining lifecycle and promotion gate | 3.5 h | medium | ⚠️ read §18 A2 first; set the Brier tolerance against D20 |
 | 10 | Full CI/CD | 3 h | medium | CI gains pytest + Postgres service container |
 | 11 | Documentation and interview prep | 2.5 h | easy | |
 

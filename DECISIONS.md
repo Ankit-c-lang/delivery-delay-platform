@@ -26,6 +26,8 @@ duplicated** — §18 is the authority, and two copies would drift apart.
 | [D16](#d16) | Pin the CI runner OS and the action majors | 2026-09-28 |
 | [D17](#d17) | Raw timestamps are `TIMESTAMP`, never `TIMESTAMPTZ` | 2026-09-28 |
 | [D18](#d18) | The `raw` schema is a faithful landing zone | 2026-09-28 |
+| [D19](#d19) | Quarantine `order_delivered_customer_date` in `features.order_outcomes` | 2026-09-28 |
+| [D20](#d20) | The late rate is strongly non-stationary across the §4.4 windows | 2026-09-28 |
 
 ---
 
@@ -369,3 +371,78 @@ the actual failure mode worth defending against.
 **Data-quality findings for Phase 2**, recorded in `PROGRESS.md` rather than here: 8 rows are
 `delivered` with no delivery date, 6 `canceled` rows have one, and `order_estimated_delivery_date`
 is midnight in all 99,441 rows.
+
+## D19
+### Quarantine `order_delivered_customer_date` in `features.order_outcomes`
+**Decision.** `features.orders_analytical` contains **no** §4.2 denylist column, enforced by a
+Pandera schema with `strict=True`. `order_delivered_customer_date` lives in a separate
+two-column table, `features.order_outcomes` (`order_id`, `order_delivered_customer_date`,
+`is_late`), which only the Phase 3 as-of snapshot builder may read.
+
+**Why.** Phase 2's prompt says to "explicitly drop the §4.2 denylist columns before writing".
+§18 A1 then rewrote the §4.5 snapshot rule to filter on **delivery outcome time**
+(`order_delivered_customer_date < M`) instead of purchase time. Those two instructions
+collide: Phase 3 cannot implement the amended rule if the column exists nowhere downstream of
+raw. This is a consequence of A1 that the amendment did not propagate into Phase 2's prompt —
+the same class of inconsistency §18 exists to catch.
+
+Three ways out were considered:
+
+1. Keep the column in `orders_analytical`, clearly labelled. Rejected: it puts a denylist
+   column one careless `SELECT *` away from the feature matrix, and it makes `strict=True`
+   impossible to state as "no denylist column, ever".
+2. Have Phase 3 read `raw.orders` directly. Rejected: Phase 3 would have to re-derive the
+   §4.3 population filter, and a second copy of that filter is how the snapshot population
+   drifts from the training population.
+3. **Chosen:** a separate outcome table. The population filter is applied once, the label and
+   the resolution timestamp are stored together, and the boundary is a table name rather than
+   a convention — so "who reads the delivery date" is answerable with `grep`.
+
+**Consequence.** `strict=True` on the contract now means a column cannot enter the
+feature-safe table without being declared in `src/etl/schema.py` in the open. A test asserts
+the declared column list and the DDL are the same set, so the two cannot drift.
+
+**Follow-up for Phase 3.** The snapshot builder joins `order_outcomes` to
+`orders_analytical` on `order_id` and filters on `order_delivered_customer_date < M`. Add the
+import-inspection guard §18 A3 already requires for the promotion evaluation window to this
+table too, so `order_outcomes` has exactly one reader.
+
+## D20
+### The late rate is strongly non-stationary across the §4.4 windows
+**Decision.** Record the measurement now and carry it into Phases 5 and 9. **Do not** move
+the split boundaries to flatten it.
+
+**Measured** on the 96,203-order population:
+
+| Window | Orders | Late rate |
+|---|---:|---:|
+| warm-up 2017-01 → 04 | 7,252 | 4.66% |
+| **v1 fit** 2017-05 → 12 | 36,174 | 5.85% |
+| **v1 calibrate** 2018-01 → 02 | 13,624 | **9.75%** |
+| **v2 fit** 2017-05 → 2018-02 | 49,798 | 6.92% |
+| **v2 calibrate** 2018-03 → 04 | 13,801 | **11.84%** |
+| **promotion evaluation** 2018-05 → 08 | 25,352 | **4.40%** |
+
+Monthly extremes: 2018-03 at 18.96%, 2018-06 at 1.16% — a 16-fold spread. November 2017
+(12.40% against a ~3% autumn baseline) is the Black Friday spike §4.4 predicts.
+
+**Why it matters.** Both calibration windows carry 2.2-2.7x the base rate of the window both
+models are judged on. Isotonic calibration fitted at a ~10-12% prior will **over-predict** on
+a 4.4% evaluation set, and the cost-optimal threshold chosen on the calibration window will
+be too low there. Phase 5 will see a poor Brier score on the evaluation set and the cause
+will not be the code.
+
+**Why not move the boundaries.** Choosing split dates to make the base rate look stable is
+fitting the experiment design to the answer. The instability is a real property of this
+dataset and of delivery operations, the windows follow §4.4 and §18 A2, and a production
+retraining cadence faces exactly this.
+
+**How to apply.**
+- *Phase 5:* report calibration on the calibration window **and** on the evaluation set, and
+  say plainly that the gap is a base-rate shift. Consider reporting a threshold swept on each.
+- *Phase 9:* the promotion gate is unaffected in its comparison, because champion and
+  challenger are scored on the **same** evaluation set — the shift cancels. But the absolute
+  Brier tolerance must be set with these numbers in mind, not against an assumption of
+  stationarity.
+- *Phase 11:* this is the honest answer to "how would you know your model had drifted?" —
+  the drift is already in the training data.

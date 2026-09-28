@@ -48,6 +48,7 @@ reports/*
 # Row-count reconciliation is evidence that the load is complete, and a cloner cannot
 # regenerate it without the (non-committable) dataset. It contains counts, not data.
 !reports/raw_load_reconciliation.md
+!reports/etl_funnel.md
 *.png
 !docs/**/*.png
 

@@ -47,13 +47,15 @@ explicit approval.
 `make help` lists what actually exists. Each phase adds its own targets; a target whose
 module does not exist yet is not written (DECISIONS.md D15).
 
-**Exist now (Phase 0):**
-- `make lint | format | test` — ruff + black + pytest
+**Exist now (Phases 0-2):**
+- `make lint | format | test | test-unit` — `test-unit` skips anything needing Postgres or
+  the dataset, which is what CI will run from Phase 10
 - `make up | down | stop | ps | logs | health | psql`
   `up` waits for both services to report `healthy`. `down` keeps volumes on purpose.
+- `make check-data | load-raw | build-orders` and `make etl` for all three in order
 
 **Arrive with their phase:**
-- `make load-raw` (1) · `build-orders` (2) · `features` (3)
+- `make features` (3)
 - `make train V=v1` (4) · `register` (6) · `promote` (9)
 - `make serve | bench` (7-8)
 - `make bootstrap` (8) — the ordered first-run sequence (PLAN §18 A5). **Required before
@@ -62,9 +64,10 @@ module does not exist yet is not written (DECISIONS.md D15).
 
 All Python entry points run through `.venv/bin/python -m src.x`.
 
-Only `requirements-dev.txt` plus `sqlalchemy psycopg2-binary pydantic pydantic-settings
-pyyaml` are installed so far. The full training stack installs in Phase 4; `requirements.txt`
-and `requirements-api.txt` are unproven until then. MLflow is reached over HTTP at
+Installed so far: `requirements-dev.txt` plus `sqlalchemy psycopg2-binary pydantic
+pydantic-settings pyyaml pandas pandera` (pandas 3.0.6, pandera 0.33.1 — note the import is
+`pandera.pandas`, not top-level `pandera`). The modelling stack installs in Phase 4;
+`requirements-api.txt` is unproven until Phase 8. MLflow is reached over HTTP at
 `$MLFLOW_TRACKING_URI`, never by opening `mlflow/mlflow.db` directly (D12).
 
 ## Invariants (never break these)
@@ -94,6 +97,11 @@ and `requirements-api.txt` are unproven until then. MLflow is reached over HTTP 
 11. Row counts for the Olist CSVs must come from a CSV parser, never `wc -l`:
     `olist_order_reviews_dataset.csv` is 99,224 rows (not 104,719 — embedded newlines) and
     `product_category_name_translation.csv` is 71 (not 70 — no trailing newline).
+12. **`order_delivered_customer_date` lives ONLY in `features.order_outcomes`** (with
+    `order_id` and `is_late`). `features.orders_analytical` is feature-safe and its Pandera
+    contract is `strict=True`, so a denylist column cannot enter it without being declared
+    in `src/etl/schema.py`. Only the §4.5 snapshot builder may read `order_outcomes`
+    (DECISIONS.md D19).
 
 ## Out of scope (do not add)
 Airflow, Prefect, Dagster, Kafka, Kubernetes, Terraform, Spark, a feature store, a vector
@@ -125,7 +133,9 @@ splitting, Streamlit. If a change isn't in `PLAN.md`, ask before writing it.
 - Commit or push only when asked.
 
 ## Current phase
-**Phase 0 — Skeleton and environment: COMPLETE.** Two healthy containers, lint clean, CI green
-on the first push. **Next: Phase 1 — Raw load into Postgres.** Do not implement future phases.
-`PROGRESS.md` carries the detail, including what is *not* yet verified — notably that
-`requirements.txt` and `requirements-api.txt` have still never been installed.
+**Phases 0-2 COMPLETE.** `raw` holds 9 tables / 1,550,922 rows;
+`features.orders_analytical` holds 96,203 rows with an `is_late` rate of 6.79%; 80 tests pass.
+**Next: Phase 3 — As-of aggregates and feature assembly, the hardest phase. Read `PLAN.md`
+§18 A1 before writing any of it.** Do not implement future phases. `PROGRESS.md` carries the
+detail, including what is *not* yet verified and the D20 base-rate finding that Phases 5 and 9
+must account for.

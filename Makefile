@@ -8,7 +8,8 @@ PY := .venv/bin/python
 COMPOSE := docker compose -f docker-compose.yml
 
 .DEFAULT_GOAL := help
-.PHONY: help lint format test test-unit up down stop ps logs psql health check-data load-raw
+.PHONY: help lint format test test-unit up down stop ps logs psql health check-data load-raw \
+        build-orders etl
 
 help: ## List available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -57,3 +58,10 @@ check-data: ## Verify the 9 Olist CSVs are present and their headers match the l
 
 load-raw: ## Load the 9 CSVs into the postgres `raw` schema. Idempotent: truncates first.
 	$(PY) -m src.etl.load_raw
+
+# --- Phase 2 -------------------------------------------------------------------
+
+build-orders: ## Build features.orders_analytical + order_outcomes from the raw schema
+	$(PY) -m src.etl.build_orders
+
+etl: check-data load-raw build-orders ## The full ETL chain, in order
