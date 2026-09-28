@@ -74,8 +74,8 @@ Private now, flippable to public whenever the work justifies it.
 
 ## D5
 ### Amend `PLAN.md` in place, after committing the original unmodified
-**Decision.** Commit `PLAN.md` as drafted (`d63c6c0`), then patch 30 spots in the body and
-append §18 (`8bce10c`). Where §18 and the body disagree, §18 wins.
+**Decision.** Commit `PLAN.md` as drafted (`a098948`), then patch 30 spots in the body and
+append §18 (`1d76389`). Where §18 and the body disagree, §18 wins.
 
 **Why.** Two reasons. First, PLAN §13 runs one phase per fresh session, each opening with
 "read PLAN.md §x" — a stale phase prompt would actively produce the defect. Phase 7's prompt
@@ -167,6 +167,11 @@ especially 2, 3 and 8, because they are the ones a design review had to correct.
 **Decision.** Commit messages carry no `Co-Authored-By` line and no tool credit of any kind.
 Plain imperative mood. Recorded in `CLAUDE.md` under Working agreement.
 
-**Why.** User instruction, 2026-09-28. Applies to every commit from that point on. The two
-pre-existing commits (`d63c6c0`, `8bce10c`) predate it and are left as they are rather than
-rewritten, since they are already pushed.
+**Why.** User instruction, 2026-09-28. Applies to every commit.
+
+**Applied retroactively.** The three commits made before the instruction carried trailers, so
+their messages were rewritten with `git filter-branch --msg-filter` and force-pushed on
+2026-09-28. Safe because the repository is private with no forks, no other branches and no
+open pull requests, so nobody else's history was disturbed. Verified: every commit tree is
+identical before and after — only messages changed. The old SHAs are dead; the mapping is
+`d63c6c0` -> `a098948`, `8bce10c` -> `1d76389`, `17ec901` -> `80b9e21`.

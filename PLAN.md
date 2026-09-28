@@ -1243,7 +1243,7 @@ The last row is the important one. Parity testing and promotion gates are things
 A review of v1 of this plan found six defects, plus one change forced by library
 versions. All are resolved below and the body of the document has been patched to
 match. **Where the body and this section disagree, this section wins.** The original
-unamended plan is preserved in git history at commit `d63c6c0` — the diff is the record
+unamended plan is preserved in git history at commit `a098948` — the diff is the record
 of what changed and why, and it is worth reading before an interview, because "I found
 a target-correlated leak in my own design and measured it" is a stronger answer than a
 plan that was simply right the first time.

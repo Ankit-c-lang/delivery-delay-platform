@@ -74,9 +74,9 @@ Completed 2026-09-28. Full table in `CLAUDE.md`.
 
 - Environment audited end to end; two blockers found and cleared (broken `venv`, 9.9 GB
   free disk).
-- `PLAN.md` committed unamended at `d63c6c0` so the review reads as a diff.
+- `PLAN.md` committed unamended at `a098948` so the review reads as a diff.
 - **Design review found six defects plus one version-drift change.** All resolved in
-  `PLAN.md` §18 and patched through the body (30 edits) at `8bce10c`. Two were provable
+  `PLAN.md` §18 and patched through the body (30 edits) at `1d76389`. Two were provable
   contradictions between required tests; one was a target-correlated label leak measured
   on the real data. See `DECISIONS.md` D5-D11.
 - `CLAUDE.md`, `PROGRESS.md`, `DECISIONS.md` created.
