@@ -275,11 +275,36 @@ LEFT JOIN (SELECT order_id, category FROM category_rank WHERE rn = 1) dc ON dc.o
 LEFT JOIN raw.product_category_name_translation tr ON tr.product_category_name = dc.category
 """
 
+# The quarantine table (D19). It holds the post-purchase facts that the §4.5 as-of
+# aggregates need about *already-resolved historical* orders, and nothing else reads it.
+#
+# Using a post-purchase column here is not a §4.2 violation. The denylist forbids a column
+# of the order *being predicted*; these are columns of other orders whose outcomes were
+# already known at the prediction moment. `is_late` itself is derived the same way — that is
+# the entire premise of §4.5.
+#
+# `handling_days` is NULL rather than clipped where the source is self-contradictory:
+# 165 orders record a carrier handoff BEFORE the purchase (as early as -171 days) and 19
+# record it AFTER customer delivery. A negative handling time is a recording error, not a
+# fast handoff, and averaging it in would drag a seller's history the wrong way.
 OUTCOMES_SQL = f"""
-INSERT INTO {OUTCOMES_TABLE} (order_id, order_delivered_customer_date, is_late)
+INSERT INTO {OUTCOMES_TABLE} (
+    order_id, order_delivered_customer_date, order_delivered_carrier_date,
+    is_late, delivery_days, handling_days
+)
 SELECT o.order_id,
        o.order_delivered_customer_date,
-       (o.order_delivered_customer_date::date > o.order_estimated_delivery_date::date)
+       o.order_delivered_carrier_date,
+       (o.order_delivered_customer_date::date > o.order_estimated_delivery_date::date),
+       extract(epoch FROM (o.order_delivered_customer_date - o.order_purchase_timestamp))
+           / 86400.0,
+       CASE
+           WHEN o.order_delivered_carrier_date IS NULL                                 THEN NULL
+           WHEN o.order_delivered_carrier_date < o.order_purchase_timestamp            THEN NULL
+           WHEN o.order_delivered_carrier_date > o.order_delivered_customer_date        THEN NULL
+           ELSE extract(epoch FROM (o.order_delivered_carrier_date
+                                    - o.order_purchase_timestamp)) / 86400.0
+       END
 FROM raw.orders o
 WHERE o.order_status = 'delivered'
   AND o.order_delivered_customer_date IS NOT NULL
@@ -339,8 +364,20 @@ def create_tables(conn: Connection) -> None:
             f"CREATE TABLE {OUTCOMES_TABLE} (\n"
             "    order_id TEXT NOT NULL,\n"
             "    order_delivered_customer_date TIMESTAMP NOT NULL,\n"
+            # 1 of 96,203 population orders has no carrier handoff recorded.
+            "    order_delivered_carrier_date TIMESTAMP,\n"
             "    is_late BOOLEAN NOT NULL,\n"
+            "    delivery_days DOUBLE PRECISION NOT NULL,\n"
+            # NULL where the source contradicts itself; see OUTCOMES_SQL.
+            "    handling_days DOUBLE PRECISION,\n"
             "    CONSTRAINT order_outcomes_pkey PRIMARY KEY (order_id)\n)"
+        )
+    )
+    # The snapshot builder filters on this column for every month in the window.
+    conn.execute(
+        text(
+            f"CREATE INDEX order_outcomes_delivered_idx "
+            f"ON {OUTCOMES_TABLE} (order_delivered_customer_date)"
         )
     )
 
@@ -486,6 +523,8 @@ def build() -> dict[str, object]:
 
         written = copy_frame(conn, frame, ANALYTICAL_TABLE, COLUMN_NAMES)
         outcomes = conn.execute(text(OUTCOMES_SQL), params).rowcount
+        conn.execute(text(f"ANALYZE {ANALYTICAL_TABLE}"))
+        conn.execute(text(f"ANALYZE {OUTCOMES_TABLE}"))
         conn.execute(text(f"DROP TABLE {STAGE_TABLE}"))
 
         if written != funnel[-1][1]:

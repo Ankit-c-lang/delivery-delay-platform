@@ -49,6 +49,7 @@ reports/*
 # regenerate it without the (non-committable) dataset. It contains counts, not data.
 !reports/raw_load_reconciliation.md
 !reports/etl_funnel.md
+!reports/as_of_snapshots.md
 *.png
 !docs/**/*.png
 

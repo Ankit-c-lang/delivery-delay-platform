@@ -314,7 +314,16 @@ class TestOutcomesQuarantine:
 
     pytestmark: ClassVar = [pytest.mark.integration, pytest.mark.slow]
 
-    def test_outcomes_table_holds_the_quarantined_column(self, engine):
+    def test_outcomes_table_holds_exactly_the_quarantined_columns(self, engine):
+        """The quarantine table's column list is a deliberate, closed set.
+
+        It carries the post-purchase facts the §4.5 as-of aggregates need about *already
+        resolved* orders, and nothing else. `order_delivered_carrier_date`, `delivery_days`
+        and `handling_days` were added for `avg_handling_days` and `avg_delivery_days`
+        (PLAN.md §5 F6/F7). Asserting equality rather than containment is the point: a new
+        post-purchase column cannot be parked here without this test being changed in the
+        open.
+        """
         with engine.connect() as conn:
             columns = {
                 row[0]
@@ -325,7 +334,40 @@ class TestOutcomesQuarantine:
                     )
                 )
             }
-        assert columns == {"order_id", "order_delivered_customer_date", "is_late"}
+        assert columns == {
+            "order_id",
+            "order_delivered_customer_date",
+            "order_delivered_carrier_date",
+            "is_late",
+            "delivery_days",
+            "handling_days",
+        }
+
+    def test_handling_days_excludes_self_contradictory_rows_rather_than_clipping(self, engine):
+        """165 orders record a carrier handoff before their own purchase (down to -171 days)
+        and 19 record it after customer delivery. Those are recording errors, so
+        `handling_days` is NULL; clipping to 0 would make the seller look instant."""
+        with engine.connect() as conn:
+            total, nulls, minimum = conn.execute(
+                text(
+                    f"select count(*), count(*) filter (where handling_days is null), "
+                    f"min(handling_days) from {OUTCOMES_TABLE}"
+                )
+            ).one()
+        assert total == EXPECTED_ROWS
+        assert nulls == 185  # 1 missing carrier date + 184 contradictory
+        assert float(minimum) >= 0.0
+
+    def test_delivery_days_is_always_positive_and_never_null(self, engine):
+        with engine.connect() as conn:
+            nulls, minimum = conn.execute(
+                text(
+                    f"select count(*) filter (where delivery_days is null), min(delivery_days) "
+                    f"from {OUTCOMES_TABLE}"
+                )
+            ).one()
+        assert nulls == 0
+        assert float(minimum) > 0.0
 
     def test_outcomes_row_count_matches_the_analytical_table(self, engine):
         with engine.connect() as conn:

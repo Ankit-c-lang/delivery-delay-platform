@@ -5,18 +5,85 @@ that task. Source of truth for *what* to build is `PLAN.md`; this file only trac
 are*. Decisions and their reasons live in `DECISIONS.md`.
 
 - **Plan version:** v1 (2026-09-28) + amendments §18 · **Pre-flight completed:** 2026-09-28
-- **Current phase:** Phase 2 — Transform, validate, analytical table · **✅ COMPLETE** —
-  96,203 orders, `is_late` 6.79%, Pandera green, 80 tests green
-- **Overall:** 3 / 12 phases · pre-flight and environment complete (not counted as a phase)
-- **Estimated remaining:** ~33 h of build work (PLAN §3 budget: 36-42 h)
+- **Current phase:** Phase 3 — As-of aggregates and feature assembly · **part A of 3 complete**
+  (snapshots). Parts B (`build.py` + `artifact.py`) and C (`splits.py`) remain; §13 says they are
+  separate prompts and must not be combined.
+- **Overall:** 3 / 12 phases · Phase 3 is ~40% done · 111 tests green, 85% coverage
+- **Estimated remaining:** ~31 h of build work (PLAN §3 budget: 36-42 h)
 
 ---
 
 ## Currently working on
 
-**Nothing in flight.** Phase 2 is complete, and a pre-push audit of Phases 0-2 has been run.
+**Nothing in flight.** Phase 3 **part A** is complete: `src/features/history.py`, the
+leakage-critical module.
 
-### Pre-push audit (2026-09-28) — two real defects found and fixed
+Six snapshot tables, 34,427 rows, built in **3.2 s**. 29 new tests (111 total, 85% coverage);
+22 of the new ones are synthetic and need no database, because a hand-built entity with a known
+history is the only way to prove the month boundary is exactly right rather than approximately
+right.
+
+**Written test-first, as §13 Phase 3 requires.** The tests defined the module's API before any
+implementation existed, and all 22 synthetic ones passed on the first run of the finished code.
+
+### The headline finding: the history features are weak, and that is correct
+
+§4.5 calls these "the most predictive features available". Measured on 88,951 training rows they
+are not — and the comparison against the leaky rule is the point:
+
+| Feature | corr (A1 rule) | corr (leaky rule) | inflation |
+|---|---:|---:|---:|
+| `route_late_rate_hist` | **+0.0785** | +0.1037 | 1.3x |
+| `seller_late_rate_hist` | **+0.0197** | +0.0398 | **2.0x** |
+| `category_late_rate_hist` | −0.0062 | +0.0070 | sign flip |
+
+I rebuilt the identical snapshots with the filter column swapped to `order_purchase_timestamp`
+to get the middle column. **Half the apparent signal in the headline history feature was the
+future leaking in.** That is the measured cost of A1, and the strongest evidence it was a real
+defect rather than a pedantic one.
+
+Ruled out as explanations: a **time confound** (within-month correlations are essentially
+unchanged, and month explains only 3.6% of the variance in `is_late`) and a **bug** (all 26,730
+seller-month snapshots were recomputed in SQL, set-based, and compared with a FULL OUTER JOIN —
+zero mismatches on `order_count`, `late_rate` and `avg_delivery_days`).
+
+Honest reading: on Olist, *when* and *where* an order ships predicts lateness far better than
+*who* ships it. See `DECISIONS.md` D22, which also sets the Phase 4 expectation — **if
+`seller_late_rate_hist` dominates the model, that is a leakage alarm, not a win.**
+
+### Two problems found and fixed while doing it
+
+**1. `avg_handling_days` needed a column Phase 2 had dropped.** §5 F6 asks for
+`seller_avg_handling_days_hist`, which needs `order_delivered_carrier_date` — denylisted, and
+dropped. Same collision as D19, unanticipated. `features.order_outcomes` now also carries
+`order_delivered_carrier_date`, `delivery_days` and `handling_days`. **Using a post-purchase
+column of a *resolved historical* order is not a §4.2 violation** — the denylist governs the
+order being predicted, and `is_late` is derived the same way. The Phase 2 test asserting that
+table's exact column set failed on the change, which is precisely its job.
+
+Data quality handled there: 165 orders record a carrier handoff **before their own purchase**
+(down to −171 days) and 19 record it after customer delivery. `handling_days` is NULL for those
+184 plus the 1 with no carrier date — excluded, not clipped, because a negative handling time is
+a recording error rather than a fast handoff.
+
+**2. One of my own tests was unusable.** The SQL cross-check was written as a correlated
+subquery per snapshot row and ran for **over nine minutes** on 26,730 rows before I cancelled
+it. Rewritten set-based it takes **under 3 seconds**, and it is now *stronger*: a FULL OUTER
+JOIN catches wrong metrics, extra rows and missing rows, where the correlated version only
+checked rows that existed. A suite that slow would have made the remaining nine phases painful.
+
+Two smaller test defects fixed in passing: an ambiguous `is_late` reference (both
+`orders_analytical` and `order_outcomes` carry it) and a guessed threshold — `differing >
+10_000` against an actual 9,245. Replaced with the measured values, 9,245 snapshot rows and
+36,549 leaked order-contributions, pinned exactly.
+
+A third was caught before it did damage: the `write_snapshots` round-trip test DROPs and
+recreates the real snapshot tables, so it runs inside a transaction that always rolls back, and
+asserts afterwards that the real table still holds its 26,730 rows.
+
+---
+
+## Earlier: pre-push audit of Phases 0-2 (2026-09-28) — two defects found and fixed
 
 **1. A first-run performance bug that would have looked like a hang.** The whole ETL was run
 into a freshly created, empty database to test reproducibility. `load_raw` was fine, but the
@@ -37,7 +104,7 @@ alive **locally**. They were unreachable from `main` and the remote only ever ha
 until a future `gc`; pruning them was declined as irreversible and is not needed, since `git
 push` only sends objects reachable from the ref being pushed.
 
-### What the audit verified as sound
+### What it verified as sound
 
 | Check | Result |
 |---|---|
@@ -53,7 +120,7 @@ push` only sends objects reachable from the ref being pushed.
 | Tests | 80 collected — 37 unit, 43 needing Postgres or the dataset; all pass |
 | Sibling project | all 3 `realtime-fraud-detection` containers still up, image and volume intact |
 
-### Two findings carried forward
+### Two findings it carried forward
 
 - **`xgboost` pulls a 305 MB CUDA library.** A dry-run resolve of `requirements-api.txt` brings
   in `nvidia-nccl-cu13` (measured: 305.1 MB) on a CPU-only machine. `xgboost-cpu` is the slim
@@ -133,34 +200,37 @@ filter and §4.5's snapshot rule:
 
 ## Next up (in order)
 
-**Phase 3 — As-of aggregates and feature assembly** (PLAN §13 Phase 3, ~5 h, **the hardest
-phase**).
+**Phase 3 part B — `src/features/build.py` and `src/features/artifact.py`** (PLAN §13 Phase 3,
+second prompt). §13 is explicit: *"Then a second prompt for `build.py` + `artifact.py`, and a
+third for `splits.py`. Do not combine them."*
 
-**Read `PLAN.md` §18 A1 before writing a line of it.** The original snapshot rule leaked
-future outcomes and the leak favours the positive class.
+Read `PLAN.md` §5 and §6.2 first.
 
-**Carry into Phase 3:**
-- Snapshots for month *M* admit only orders whose **delivery outcome** was known before *M*:
-  `order_delivered_customer_date < M`, never `order_purchase_timestamp < M`. Assert
-  `max(order_delivered_customer_date) < M` in a test (§6.6, §18 A1).
-- That column lives **only** in `features.order_outcomes`. Join it to `orders_analytical` on
-  `order_id`. Add the import-inspection guard so `order_outcomes` has exactly one reader, the
-  same way §18 A3 requires for the evaluation window (D19).
-- Entities are seller (`seller_id`), route (`route`, already built as
-  `seller_state->customer_state`) and product category (`dominant_category`). All three are in
-  `orders_analytical`.
-- Join each order to the snapshot for its own `purchase_month`, which is already a
-  first-of-month timestamp in the table.
-- Cold start: emit a `*_is_new` flag and fall back seller → seller state → global. Never
-  impute silently.
-- `days_to_shipping_limit` is stored **raw**, range 2.00 to 1052.00 days. Winsorize the tail
-  and audit near-collinearity with `promised_days` (§18 A4) — both are Phase 3's job.
-- 1,330 orders have no `dominant_category` and 16 no weight or volume. Handle explicitly.
-- The warm-up window 2017-01 → 04 (7,252 orders) exists so 2017-05 already has four months of
-  *resolved* history. Those rows are aggregate input only, never training rows.
+**What part A already provides:**
+- `attach_history(orders, snapshots)` returns all four metrics per entity family plus
+  `{entity}_is_new`. That is **15 columns**; §5 wants only **10** of them as features (F6 has 5,
+  F7 has 3, F8 has 2). Part B selects; part A deliberately does not.
+- `snapshot_months`, `build_snapshots`, `build_all_snapshots`, `write_snapshots` and the six
+  tables, all keyed `(entity, snapshot_month)`.
 
-**Start of session:** `make up`, then `make etl` if the volume is fresh (**21.6 s** from an
-empty database, measured). Credentials are already in `.env`.
+**Still to build in part B:** the other seven families of §5 (F1-F5), the top-30 category cap
+with `other`, `freight_ratio` with a price-zero guard, `customer_region` from state,
+`customer_zip_prefix_2`, `max_item_weight_g` / `max_item_volume_cm3` / `avg_density` (none of
+which are in `orders_analytical` yet — they need the item level, so Part B must revisit
+`raw.order_items`), and `PreprocessingArtifact` with fit/transform/save/load.
+
+**Carry into part B:**
+- `days_to_shipping_limit` is raw, 2.00 to 1052.00 days. Winsorize the tail and audit
+  near-collinearity with `promised_days` (§18 A4).
+- 1,330 orders have no `dominant_category`; 16 have no weight or volume.
+- Column order must match the artifact's stored list exactly (§6.6), and `transform()` twice on
+  the same input must be identical.
+
+**Then part C — `src/splits.py`** reading `configs/splits.yaml`, with the
+`max(train.purchase) < min(val.purchase) < min(evaluation.purchase)` assertion.
+
+**Start of session:** `make up`, then `make etl && make snapshots` if the volume is fresh
+(21.6 s + 3.2 s, measured). Credentials are already in `.env`.
 
 ---
 
@@ -279,6 +349,36 @@ Median then handles the 199 prefixes that remain noisy within Brazil.
 inside 5-10%. Only the one-row-per-order test catches it, which is now stated in the test
 module's docstring so nobody relies on the wrong guard.
 
+### Phase 3 part A — As-of monthly snapshots — ✅ COMPLETE (2026-09-28)
+
+| # | Item | Verified by |
+|---|---|---|
+| 1 | `src/features/history.py` — expanding as-of snapshots for seller / route / category | 6 tables, 34,427 rows, 3.2 s |
+| 2 | Cold-start fallback entity → state → global with `{entity}_is_new` | seller 7.56%, route 0.29%, category 1.33% on training rows; the state level rescues 6,711 of 6,729 cold sellers, 18 need global |
+| 3 | `tests/test_features_history.py` | 29 tests, 22 of them synthetic and database-free |
+| 4 | `make snapshots` | run repeatedly; deterministic |
+
+**Snapshot tables:** `seller_monthly` 26,730 · `route_monthly` 5,557 · `category_monthly` 1,255 ·
+`customer_state_monthly` 503 · `seller_state_monthly` 363 · `global_monthly` 19.
+`global_monthly` has 19 rows, not 20, because 2017-01 has **zero** resolved orders — months with
+no history are absent, never zero-filled, since a zero-filled row reads as "0% late" rather than
+"unknown".
+
+**The leakage boundary is proven three ways:** synthetically at the exact boundary (an order
+delivered at 00:00:00 on the first of *M* is excluded — `<`, never `<=`); by the plan's
+sharp-change seller (clean for months 1-3 then late in month 4 reads **0.0** at month 4, not
+0.25); and against the real data by an independent set-based SQL recount of all 26,730
+seller-month snapshots, FULL OUTER JOIN, zero mismatches.
+
+**The resolved frame has no purchase-timestamp column at all**, so the leaky rule is not merely
+avoided — it is unavailable. A test asserts that, so widening the contract requires making the
+argument in the open.
+
+**Design decision worth knowing:** the fallback supplies *rates*, never *volumes*.
+`seller_order_count_hist` is 0 for a cold seller, not São Paulo's thousands. Inheriting the
+volume would tell the model a brand-new seller has a long track record — the opposite of true,
+and it would make `order_count` an anti-signal exactly where `is_new` is trying to help.
+
 ---
 
 ## Remaining work
@@ -288,8 +388,8 @@ module's docstring so nobody relies on the wrong guard.
 | 0 | Skeleton and environment | 1.5 h | easy | ✅ **complete** · CI green |
 | 1 | Raw load into Postgres | 2.5 h | easy-med | ✅ **complete** · 33 tests |
 | 2 | Transform, validate, analytical table | 4 h | medium | ✅ **complete** · 80 tests |
-| 3 | As-of aggregates and feature assembly | 5 h | **hardest** | **next** · ⚠️ read §18 A1 first |
-| 4 | Baselines and single models | 4 h | medium | full dependency install lands here |
+| 3 | As-of aggregates and feature assembly | 5 h | **hardest** | **part A done** · B and C next |
+| 4 | Baselines and single models | 4 h | medium | full dependency install lands here · ⚠️ D22: a dominant `seller_late_rate_hist` is a leakage alarm |
 | 5 | Ensemble, calibration, threshold | 4 h | medium | ⚠️ base-rate shift (D20); fixes whether CatBoost must re-enter `requirements-api.txt` (D14) |
 | 6 | MLflow, pyfunc wrapper, registry | 4 h | medium | |
 | 7 | FastAPI and the parity test | 4 h | medium | ⚠️ read §18 A3, A6 first |

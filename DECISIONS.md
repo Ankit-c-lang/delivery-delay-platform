@@ -29,6 +29,7 @@ duplicated** — §18 is the authority, and two copies would drift apart.
 | [D19](#d19) | Quarantine `order_delivered_customer_date` in `features.order_outcomes` | 2026-09-28 |
 | [D20](#d20) | The late rate is strongly non-stationary across the §4.4 windows | 2026-09-28 |
 | [D21](#d21) | `ANALYZE` explicitly after every bulk load | 2026-09-28 |
+| [D22](#d22) | The as-of history features are weak, and that is the correct answer | 2026-09-28 |
 
 ---
 
@@ -491,3 +492,55 @@ the post-fix 16.1 s was measured on an equally empty database.
 **Rejected.** Committing between the load and the join so autovacuum can run (gives up the
 all-or-nothing transaction, which is the property two tests exist to protect). `SET
 enable_nestloop = off` (treats the symptom and distorts every other plan in the statement).
+
+## D22
+### The as-of history features are weak, and that is the correct answer
+**Finding, not a decision to change anything.** §4.5 calls the historical performance features
+"the most predictive features available". Measured on 88,951 training rows with the §18 A1 rule
+applied, they are not:
+
+| Feature | corr with `is_late` (A1 rule) | corr under the **leaky** rule | inflation |
+|---|---:|---:|---:|
+| `route_late_rate_hist` | **+0.0785** | +0.1037 | 1.3x |
+| `seller_avg_handling_days_hist` | +0.0428 | +0.0460 | 1.1x |
+| `seller_avg_delivery_days_hist` | +0.0392 | +0.0536 | 1.4x |
+| `seller_late_rate_hist` | **+0.0197** | +0.0398 | **2.0x** |
+| `category_late_rate_hist` | −0.0062 | +0.0070 | — |
+
+The right-hand columns were produced by rebuilding the identical snapshots with the filter
+column swapped to `order_purchase_timestamp`. **`seller_late_rate_hist` looks twice as
+predictive under the leaky rule**, and `category_late_rate_hist` even changes sign. That is the
+measured cost of correctness, and it is the strongest evidence that A1 was a real defect rather
+than a pedantic one: half the apparent signal in the headline history feature was the future
+leaking in.
+
+**Ruled out: a time confound.** Correlations computed *within* each purchase month are
+essentially unchanged (`seller_late_rate_hist` +0.0278 against +0.0197 raw), and month explains
+only 3.6% of the variance in `is_late`. The weakness is not D20's base-rate shift hiding the
+signal.
+
+**Ruled out: a bug.** `order_count`, `late_rate` and `avg_delivery_days` were recomputed in SQL,
+set-based, for all 26,730 seller-month snapshots and compared with a FULL OUTER JOIN: zero
+mismatches. The features compute what they claim.
+
+**So the honest reading:** on Olist, *when* and *where* an order ships predicts lateness far
+better than *who* ships it. `route_late_rate_hist` is the strongest of the family at +0.079,
+which fits — a route encodes distance and lane quality. Seller identity carries little once you
+stop reading the future.
+
+**`seller_is_new` carries no lift either:** 7.01% late for cold-start sellers against 6.96% for
+established ones. It stays in the matrix regardless, because its job is to tell the model that
+the accompanying rate was *imputed from a coarser level* rather than measured — that is a
+statement about the feature vector, not a prediction.
+
+**How to apply.**
+- *Phase 4:* expect `promised_days` to dominate and F6/F7/F8 to contribute little. Do not treat
+  that as a bug or go looking for a fix.
+- *Phase 4 audit (§5 says drop 1-3 dead features):* `category_late_rate_hist` at −0.006 is the
+  first candidate. Decide on permutation importance, not on this correlation alone.
+- *§6.7 gives a leakage alarm for a feature that is implausibly **high**. This finding adds the
+  mirror: if `seller_late_rate_hist` turns out to dominate the model, that is also an alarm*,
+  because with the correct rule it correlates at +0.02. A dominant `seller_late_rate_hist` would
+  mean the snapshot join regressed.
+- *Phase 11:* "I removed a leak and watched my best feature family lose half its apparent power"
+  is a better interview answer than any metric in this project.

@@ -55,7 +55,7 @@ module does not exist yet is not written (DECISIONS.md D15).
 - `make check-data | load-raw | build-orders` and `make etl` for all three in order
 
 **Arrive with their phase:**
-- `make features` (3)
+- `make snapshots` exists (Phase 3 part A). `make features` arrives with part B.
 - `make train V=v1` (4) · `register` (6) · `promote` (9)
 - `make serve | bench` (7-8)
 - `make bootstrap` (8) — the ordered first-run sequence (PLAN §18 A5). **Required before
@@ -100,8 +100,9 @@ pydantic-settings pyyaml pandas pandera` (pandas 3.0.6, pandera 0.33.1 — note 
 12. **`order_delivered_customer_date` lives ONLY in `features.order_outcomes`** (with
     `order_id` and `is_late`). `features.orders_analytical` is feature-safe and its Pandera
     contract is `strict=True`, so a denylist column cannot enter it without being declared
-    in `src/etl/schema.py`. Only the §4.5 snapshot builder may read `order_outcomes`
-    (DECISIONS.md D19).
+    in `src/etl/schema.py`. **`src/features/history.py` is the only module that may read
+    `order_outcomes`** (DECISIONS.md D19). It also carries `order_delivered_carrier_date`,
+    `delivery_days` and `handling_days` for the §4.5 aggregates.
 
 ## Out of scope (do not add)
 Airflow, Prefect, Dagster, Kafka, Kubernetes, Terraform, Spark, a feature store, a vector
@@ -133,9 +134,13 @@ splitting, Streamlit. If a change isn't in `PLAN.md`, ask before writing it.
 - Commit or push only when asked.
 
 ## Current phase
-**Phases 0-2 COMPLETE.** `raw` holds 9 tables / 1,550,922 rows;
-`features.orders_analytical` holds 96,203 rows with an `is_late` rate of 6.79%; 80 tests pass.
-**Next: Phase 3 — As-of aggregates and feature assembly, the hardest phase. Read `PLAN.md`
-§18 A1 before writing any of it.** Do not implement future phases. `PROGRESS.md` carries the
-detail, including what is *not* yet verified and the D20 base-rate finding that Phases 5 and 9
-must account for.
+**Phases 0-2 complete. Phase 3 part A complete** (as-of snapshots). 111 tests pass.
+`raw` holds 9 tables / 1,550,922 rows; `features.orders_analytical` holds 96,203 rows at a 6.79%
+`is_late` rate; six snapshot tables hold 34,427 rows.
+
+**Next: Phase 3 part B — `src/features/build.py` and `src/features/artifact.py`, then part C —
+`src/splits.py`. PLAN.md §13 says these are separate prompts: do not combine them.**
+
+Do not implement future phases. `PROGRESS.md` carries the detail. Two findings govern later
+phases: **D20** (base-rate shift, Phases 5 and 9) and **D22** (the history features are weak,
+and a dominant `seller_late_rate_hist` in Phase 4 is a leakage alarm, not a win).

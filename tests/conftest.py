@@ -79,6 +79,47 @@ def db_row_counts(engine, csv_row_counts) -> dict[str, int]:
         }
 
 
+@pytest.fixture(scope="session")
+def attached_features(engine) -> pd.DataFrame:
+    """Orders with as-of history attached, built from the live snapshot tables.
+
+    Session-scoped: it reads every snapshot level and joins three entity families over 96,203
+    orders, which is not something to repeat per test.
+    """
+    from sqlalchemy import text as _text
+
+    from src.features.history import (
+        ENTITIES,
+        GLOBAL_LEVEL,
+        ORDERS_QUERY,
+        attach_history,
+    )
+
+    tables = [spec.table for spec in ENTITIES]
+    tables += [spec.fallback_table for spec in ENTITIES if spec.fallback_table]
+    tables.append(GLOBAL_LEVEL.table)
+
+    with engine.connect() as conn:
+        present = {
+            row[0]
+            for row in conn.execute(
+                _text(
+                    "select table_name from information_schema.tables "
+                    "where table_schema='features'"
+                )
+            )
+        }
+        missing = [t for t in tables if t not in present]
+        if missing:
+            pytest.skip(f"snapshot tables not built ({missing}); run `make snapshots` first")
+
+        snapshots = {
+            table: pd.read_sql(_text(f"select * from features.{table}"), conn) for table in tables
+        }
+        orders = pd.read_sql(_text(ORDERS_QUERY), conn)
+    return attach_history(orders, snapshots)
+
+
 @pytest.fixture
 def minimal_frame() -> pd.DataFrame:
     """A small frame that satisfies ORDERS_ANALYTICAL_SCHEMA, for contract unit tests.

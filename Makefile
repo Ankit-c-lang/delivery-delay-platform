@@ -9,7 +9,7 @@ COMPOSE := docker compose -f docker-compose.yml
 
 .DEFAULT_GOAL := help
 .PHONY: help lint format test test-unit up down stop ps logs psql health check-data load-raw \
-        build-orders etl
+        build-orders etl snapshots
 
 help: ## List available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -65,3 +65,8 @@ build-orders: ## Build features.orders_analytical + order_outcomes from the raw 
 	$(PY) -m src.etl.build_orders
 
 etl: check-data load-raw build-orders ## The full ETL chain, in order
+
+# --- Phase 3 -------------------------------------------------------------------
+
+snapshots: ## Build the as-of monthly aggregate snapshots (PLAN.md 4.5, 18 A1)
+	$(PY) -m src.features.history
