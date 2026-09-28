@@ -23,6 +23,7 @@ duplicated** — §18 is the authority, and two copies would drift apart.
 | [D13](#d13) | Compose healthchecks force TCP, avoid curl, and run MLflow as uid 1000 | 2026-09-28 |
 | [D14](#d14) | `requirements-dev.txt` standalone; `mlflow-skinny` for the API subset | 2026-09-28 |
 | [D15](#d15) | Added `Makefile` and pre-commit in Phase 0, with Phase 0 targets only | 2026-09-28 |
+| [D16](#d16) | Pin the CI runner OS and the action majors | 2026-09-28 |
 
 ---
 
@@ -281,3 +282,23 @@ installed locally (ruff 0.16.9, black 26.5.1), so local and hook results cannot 
 
 **Rejected.** Deferring both to a later phase (pre-commit's value is catching things *before*
 the first push). Writing the full aspirational target list now with placeholder bodies.
+
+## D16
+### Pin the CI runner OS; track the action majors
+**Decision.** `runs-on: ubuntu-24.04`, not `ubuntu-latest`. `actions/checkout@v7` and
+`actions/setup-python@v7`, not v4/v5.
+
+**Why.** The first green run emitted two annotations. `ubuntu-latest` migrates to Ubuntu 26 on
+2026-10-19, which is inside this project's build window — a silent OS change mid-project is
+exactly the kind of thing that costs an hour in Phase 10, when CI gains a Postgres service
+container and the OS starts to matter. 24.04 is also what the dev VM runs, so CI, the VM and
+`python:3.12-slim` now agree on interpreter *and* base OS; that is the same argument §11 makes
+for pinning Python. Separately, checkout v4 and setup-python v5 still declare Node 20, which
+GitHub force-runs on Node 24 while warning on every run; v7 of both targets Node 24 natively.
+
+**Rejected.** Leaving `ubuntu-latest` (GitHub's recommended default, but it trades
+reproducibility for freshness, and reproducibility is a claim this project has to defend).
+Pinning the actions to full SHAs — right for a public repo handling secrets, overkill for a
+private repo running a linter, and it makes upgrades invisible.
+
+**Cost.** The pin needs revisiting when 24.04 is retired. Noted here so it is not a mystery.

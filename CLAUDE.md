@@ -125,7 +125,7 @@ splitting, Streamlit. If a change isn't in `PLAN.md`, ask before writing it.
 - Commit or push only when asked.
 
 ## Current phase
-**Phase 0 — Skeleton and environment: built and verified locally; CI unverified** (nothing has
-been pushed yet, so the workflow has never run). **Next: push, confirm CI green, then Phase 1 —
-Raw load into Postgres.** Do not implement future phases. `PROGRESS.md` carries the detail,
-including what is *not* yet verified.
+**Phase 0 — Skeleton and environment: COMPLETE.** Two healthy containers, lint clean, CI green
+on the first push. **Next: Phase 1 — Raw load into Postgres.** Do not implement future phases.
+`PROGRESS.md` carries the detail, including what is *not* yet verified — notably that
+`requirements.txt` and `requirements-api.txt` have still never been installed.

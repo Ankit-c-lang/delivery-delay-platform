@@ -18,11 +18,16 @@ concurrency:
 jobs:
   lint:
     name: ruff + black
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: the ubuntu-latest label migrates to Ubuntu 26 on
+    # 2026-10-19, and 24.04 is what the dev VM runs. Same reasoning as pinning the
+    # interpreter to 3.12 (PLAN.md §11) — CI should not change under us mid-project.
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      # v7: v4/v5 still target Node 20, which GitHub now force-runs on Node 24 and
+      # warns about on every run.
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           # Must match PLAN.md §11, the venv, python:3.12-slim and CLAUDE.md. A lockfile
           # is only valid for the interpreter that produced it (§18 A7).

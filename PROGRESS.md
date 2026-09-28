@@ -5,8 +5,8 @@ that task. Source of truth for *what* to build is `PLAN.md`; this file only trac
 are*. Decisions and their reasons live in `DECISIONS.md`.
 
 - **Plan version:** v1 (2026-09-28) + amendments §18 · **Pre-flight completed:** 2026-09-28
-- **Current phase:** Phase 0 — Skeleton and environment (PLAN §13, Phase 0) · **8 / 8 items
-  done, local verification green, CI unverified until first push**
+- **Current phase:** Phase 0 — Skeleton and environment (PLAN §13, Phase 0) · **✅ COMPLETE
+  — 8 / 8 items, local verification green, CI green on the first push**
 - **Overall:** 1 / 12 phases · pre-flight and environment complete (not counted as a phase)
 - **Estimated remaining:** ~39.5 h of build work (PLAN §3 budget: 36-42 h)
 
@@ -34,12 +34,16 @@ enough to lint and to actually run `src/db.py`. The full ~3 GB training stack wa
 Phase 4, and `requirements.lock.txt` waits with it, since a lockfile from a partial install
 would be a lie.
 
+### CI
+
+**Green on the first push** — run `36430031887`, job `ruff + black`, 17 s, `conclusion=success`.
+It did raise two warning annotations, both now fixed (D16): `ubuntu-latest` migrates to Ubuntu
+26 on 2026-10-19, and `actions/checkout@v4` / `setup-python@v5` still declare Node 20. Now
+pinned to `ubuntu-24.04` with both actions at v7, so CI matches the dev VM on base OS as well
+as interpreter.
+
 ### Not yet verified
 
-- **CI has never run.** Phase 0's completion criterion says "green CI on the first push", and
-  nothing has been pushed. `.github/workflows/ci.yml` is untested; the local `pre-commit` run
-  uses the same ruff 0.16.9 and black 26.5.1 that CI will resolve, so the lint result should
-  hold, but the workflow syntax itself is unproven.
 - `requirements.txt` and `requirements-api.txt` have never been installed, so neither is
   proven resolvable as written. `requirements-api.txt` in particular names `mlflow-skinny`
   (D14) which Phase 8 must validate against a real pyfunc load.
@@ -48,10 +52,7 @@ would be a lie.
 
 ## Next up (in order)
 
-**Immediately:** push `main` and confirm the CI run goes green. That closes Phase 0's last
-criterion. If the workflow fails it is a Phase 0 fix, not a Phase 1 problem.
-
-**Then Phase 1 — Raw load into Postgres** (PLAN §13 Phase 1, ~2.5 h, easy-medium).
+**Phase 1 — Raw load into Postgres** (PLAN §13 Phase 1, ~2.5 h, easy-medium).
 
 1. `src/etl/load_raw.py` — the 9 Olist CSVs into the `raw` schema via `COPY FROM STDIN`
 2. `src/etl/schema.py` — Pandera contracts for each raw table
@@ -101,7 +102,7 @@ Completed 2026-09-28. Full table in `CLAUDE.md`.
   on the real data. See `DECISIONS.md` D5-D11.
 - `CLAUDE.md`, `PROGRESS.md`, `DECISIONS.md` created.
 
-### Phase 0 — Skeleton and environment — ✅ built, CI pending (2026-09-28)
+### Phase 0 — Skeleton and environment — ✅ COMPLETE (2026-09-28)
 
 All eight items from the Phase 0 prompt:
 
@@ -113,7 +114,7 @@ All eight items from the Phase 0 prompt:
 | 4 | `docker-compose.yml` — `postgres` + `mlflow` only, explicit `name: delay-prediction` | `docker compose config --quiet`; `up -d --wait` reached `healthy` for both in 21 s |
 | 5 | `src/db.py` — SQLAlchemy engine factory over pydantic-settings | live query: `server_version` 16.15, `current_user` `delay`, password masked in `safe_url` and `repr` |
 | 6 | `configs/base.yaml`, `configs/splits.yaml` keyed **per version** (§18 A2) | both parse; fit/calibrate/eval windows proven pairwise disjoint for v1 and v2 |
-| 7 | `.github/workflows/ci.yml` — 3.12, `requirements-dev.txt`, ruff + black, no tests | YAML parses (`check-yaml`); **workflow itself unrun** |
+| 7 | `.github/workflows/ci.yml` — 3.12, `requirements-dev.txt`, ruff + black, no tests | green on the first push, run `36430031887`, 17 s |
 | 8 | `requirements.txt` / `-dev` / `-api`, unpinned | `-dev` installed and working; the other two not yet installed |
 
 Also, in `PLAN.md` scope but outside the numbered prompt (D15): `Makefile` (Phase 0 targets
@@ -136,7 +137,7 @@ prune of any kind was run; the only new volume is `delay-prediction-pgdata`.
 
 | Phase | Title | Est. | Difficulty | Status |
 |---|---|---|---|---|
-| 0 | Skeleton and environment | 1.5 h | easy | ✅ built · CI unverified |
+| 0 | Skeleton and environment | 1.5 h | easy | ✅ **complete** · CI green |
 | 1 | Raw load into Postgres | 2.5 h | easy-med | **next** · use parser row counts (D7) |
 | 2 | Transform, validate, analytical table | 4 h | medium | |
 | 3 | As-of aggregates and feature assembly | 5 h | **hardest** | ⚠️ read §18 A1 first |
