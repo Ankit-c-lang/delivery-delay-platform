@@ -1,0 +1,60 @@
+# Every date boundary in the project. PLAN.md §4.4, amended by §18 A2.
+#
+# NOTHING outside this file may hard-code a split date. Boundaries duplicated across
+# modules is how evaluation-set contamination happens.
+#
+# All windows are INCLUSIVE at both ends and are compared against
+# `order_purchase_timestamp` — a row belongs to a window if it was PURCHASED inside it.
+#
+# The as-of aggregate rule is a different rule and lives in PLAN.md §4.5: snapshots for
+# month M admit only orders whose DELIVERY OUTCOME was known before M
+# (`order_delivered_customer_date < M`), never orders merely purchased before M.
+# Do not reuse these boundaries for that filter (CLAUDE.md invariant 2, §18 A1).
+
+# Rows outside this range are dropped: before 2017-01 the data is thin and messy, after
+# 2018-08 delivery records tail off and the target becomes unreliable.
+analysis_window:
+  start: "2017-01-01"
+  end: "2018-08-31"
+
+# Aggregates only, zero training rows. Exists so the earliest training month already has
+# four months of *resolved* delivery history behind it.
+warmup:
+  start: "2017-01-01"
+  end: "2017-04-30"
+
+# Keyed per version. `fit` and `calibrate` must be disjoint for every version: the first
+# draft had v2 training on its own validation window, which would have made its blend
+# weights, calibration and cost-optimal threshold all in-sample (§18 A2).
+#
+# `aggregates_through` is the last month whose resolved outcomes may enter that version's
+# snapshots. Refreshing it per version is a second, independent reason v2 differs
+# from v1 (§4.5).
+versions:
+  v1:
+    fit:
+      start: "2017-05-01"
+      end: "2017-12-31"
+    calibrate:
+      start: "2018-01-01"
+      end: "2018-02-28"
+    aggregates_through: "2018-02-28"
+
+  v2:
+    fit:
+      start: "2017-05-01"
+      end: "2018-02-28"
+    calibrate:
+      start: "2018-03-01"
+      end: "2018-04-30"
+    aggregates_through: "2018-04-30"
+
+# Shared by both versions, scored twice, at the very end.
+#
+# Loaded by exactly ONE module: src/evaluation/score_holdout.py, called only by the
+# promotion gate. The parity test uses tests/fixtures/, never this window (§18 A3).
+# Because it decides which model gets promoted it is a PROMOTION EVALUATION set, not an
+# untouched generalization estimate (§18 A3).
+promotion_evaluation:
+  start: "2018-05-01"
+  end: "2018-08-31"

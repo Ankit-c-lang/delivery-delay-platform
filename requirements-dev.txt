@@ -1,0 +1,13 @@
+# Development and CI tooling — PLAN.md §11.
+#
+# Deliberately does NOT `-r requirements.txt`. The Phase 0 CI job only lints, and making
+# it install the full training stack (catboost, shap, matplotlib) to run `ruff check`
+# would add minutes to every push for nothing. From Phase 10, the CI job that runs pytest
+# installs both files.
+
+pytest
+pytest-cov
+httpx
+ruff
+black
+pre-commit

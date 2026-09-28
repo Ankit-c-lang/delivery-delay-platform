@@ -1,0 +1,35 @@
+# Local gate, same tools as CI so a push is never the first place lint fails.
+#   pre-commit install        (once, per clone)
+#   pre-commit run --all-files
+#
+# PLAN.md is the frozen design document: whitespace hooks are excluded from it so a
+# cosmetic rewrite never muddies a diff against the original plan.
+exclude: ^(PLAN\.md|notebooks/|data/)
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+      # The two that matter most here: the Olist data is CC BY-NC-SA and must never be
+      # committed, and a stray kaggle.json or key would be public history forever.
+      - id: check-added-large-files
+        args: ["--maxkb=512"]
+      - id: detect-private-key
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.9
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+
+  - repo: https://github.com/psf/black
+    rev: 26.5.1
+    hooks:
+      - id: black

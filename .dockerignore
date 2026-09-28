@@ -1,0 +1,36 @@
+# Keep the build context small: a fat context defeats layer caching (PLAN.md §10.1).
+# Model artifacts are NOT baked into the image — the model comes from the registry
+# at runtime, so nothing under mlartifacts/ or data/ belongs here.
+.git/
+.github/
+.gitignore
+.gitattributes
+.venv/
+venv/
+
+data/
+mlartifacts/
+mlruns/
+mlflow/
+mlflow.db*
+notebooks/
+reports/
+
+tests/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage*
+htmlcov/
+
+.env
+.env.*
+kaggle.json
+
+*.md
+!README.md
+.ipynb_checkpoints/
+.vscode/
+.idea/

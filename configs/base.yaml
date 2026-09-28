@@ -1,0 +1,50 @@
+# Paths, schema names and identifiers. Machine-specific and secret values live in .env,
+# never here — this file is committed.
+
+seed: 42
+
+paths:
+  raw_data: data/raw
+  reports: reports
+  fixtures: tests/fixtures
+
+database:
+  # Raw CSVs land in `raw` untouched; everything derived lives in `features`. Keeping
+  # them apart means a reload never silently rewrites a derived table.
+  raw_schema: raw
+  features_schema: features
+  analytical_table: orders_analytical
+
+mlflow:
+  # The tracking URI is NOT here: it is MLFLOW_TRACKING_URI in .env, because it differs
+  # between the host (http://127.0.0.1:5000) and a container (http://mlflow:5000).
+  experiment: delivery_delay
+  registered_model_name: delivery_delay_classifier
+  champion_alias: champion
+  challenger_alias: challenger
+
+target:
+  name: is_late
+  # is_late = order_delivered_customer_date.date() > order_estimated_delivery_date.date()
+  # Compared at DATE granularity: the estimate is date-only (midnight), so a timestamp
+  # comparison marks almost every on-time same-day delivery as late (PLAN.md §4.3).
+  compare_granularity: date
+  # Assert the positive rate lands in this band after ETL. Outside it means the
+  # granularity bug above, not an interesting finding.
+  expected_positive_rate:
+    min: 0.05
+    max: 0.10
+
+population_filter:
+  order_status: delivered
+  require_delivered_date: true
+
+metrics:
+  # PR-AUC leads: with ~7% positives, ROC-AUC is flattering (PLAN.md §4.6).
+  primary: average_precision
+  secondary:
+    - roc_auc
+    - brier_score
+    - recall_at_capacity
+  # "If ops can review the top 10% of orders daily, what share of late orders do we catch?"
+  review_capacity: 0.10

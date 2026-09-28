@@ -1,0 +1,42 @@
+# Phase 0: lint only. Phase 10 adds pytest with a Postgres service container, the ETL
+# smoke test on a synthetic fixture, and coverage (PLAN.md §10.3).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: ruff + black
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # Must match PLAN.md §11, the venv, python:3.12-slim and CLAUDE.md. A lockfile
+          # is only valid for the interpreter that produced it (§18 A7).
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install dev tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: ruff check
+        run: ruff check .
+
+      - name: black --check
+        run: black --check .

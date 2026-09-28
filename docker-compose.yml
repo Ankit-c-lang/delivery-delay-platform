@@ -1,0 +1,80 @@
+# Phase 0 skeleton: infrastructure only. The `api` service arrives in Phase 8, and a
+# `trainer` service under `profiles: ["training"]` is optional (PLAN.md §10.2).
+#
+# The project name is explicit so container, volume and network prefixes never depend on
+# the directory name. This machine also runs realtime-fraud-detection; an ambiguous
+# project name is how one project's teardown deletes another's volume.
+name: delay-prediction
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: delay-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env}
+      # Keep the cluster in a subdirectory of the mount point: the volume root then
+      # stays empty, which lets the entrypoint tell "fresh volume" from "existing data".
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      # 127.0.0.1 only. The container always listens on 5432 internally.
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # -h 127.0.0.1 is load-bearing, not decoration. During initdb the official
+      # entrypoint starts a TEMPORARY server with --listen_addresses='' (Unix socket
+      # only). A bare `pg_isready` reaches that socket and reports healthy while the
+      # real server is still seconds away, so dependents start and get "connection
+      # refused". Forcing TCP means the check can only pass once the real server is up.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v3.16.1
+    container_name: delay-mlflow
+    restart: unless-stopped
+    # Run as the host user so files written into the bind mounts stay owned by us and
+    # can be removed without sudo. id -u is 1000 on this machine.
+    user: "1000:1000"
+    # A file-based backend store is required for the Model Registry — plain ./mlruns
+    # filesystem tracking does not support it (PLAN.md §7). Four slashes: an absolute
+    # path. --serve-artifacts proxies artifact I/O through the tracking server, so
+    # clients never need to see /mlartifacts on their own filesystem.
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri sqlite:////mlflow/mlflow.db
+      --serve-artifacts
+      --artifacts-destination /mlartifacts
+    ports:
+      - "127.0.0.1:${MLFLOW_PORT:-5000}:5000"
+    volumes:
+      # Bind mounts, not named volumes: the run database and the artifacts are the
+      # project's record and should be visible and backup-able from the host.
+      - ./mlflow:/mlflow
+      - ./mlartifacts:/mlartifacts
+    healthcheck:
+      # Python, not `curl -f`: this image ships neither curl nor wget reliably, and a
+      # healthcheck whose binary is missing fails permanently and silently-looking.
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:5000/health').status == 200 else 1)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  pgdata:
+    name: delay-prediction-pgdata

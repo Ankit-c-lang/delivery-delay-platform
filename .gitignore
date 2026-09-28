@@ -1,7 +1,55 @@
-# Interim safety net — Phase 0 replaces this with the full version (PLAN.md §12).
-# Purpose: make it impossible to stage the CC BY-NC-SA Olist data or secrets.
+# --- Data (CC BY-NC-SA licensed: never commit it) ------------------------------
 data/
-.venv/
+
+# --- MLflow -------------------------------------------------------------------
+mlflow.db
+mlflow.db-journal
+mlflow/
+mlartifacts/
+mlruns/
+
+# --- Secrets ------------------------------------------------------------------
 .env
-__pycache__/
+.env.*
+!.env.example
 kaggle.json
+*.pem
+*.key
+
+# --- Python -------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+
+# --- Tooling caches -----------------------------------------------------------
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# --- Notebooks ----------------------------------------------------------------
+.ipynb_checkpoints/
+
+# --- Generated outputs --------------------------------------------------------
+# reports/promotions.md is committed on purpose (PLAN.md §8): the promotion decisions
+# are part of the deliverable. Everything else in reports/ is regenerable.
+reports/*
+!reports/.gitkeep
+!reports/promotions.md
+*.png
+!docs/**/*.png
+
+# --- Editor / OS --------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+.DS_Store

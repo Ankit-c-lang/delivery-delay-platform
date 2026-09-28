@@ -1,0 +1,26 @@
+# Normalise to LF in the repo and in every checkout. The repo is developed in a Linux
+# VM but may be cloned on Windows; CRLF sneaking into a shell script or a Dockerfile
+# breaks the container build in a way that is tedious to diagnose (PLAN.md §11).
+* text=auto eol=lf
+
+*.py    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.toml  text eol=lf
+*.md    text eol=lf
+*.sql   text eol=lf
+*.txt   text eol=lf
+Makefile text eol=lf
+Dockerfile text eol=lf
+*.sh    text eol=lf
+
+*.csv   text eol=lf
+*.json  text eol=lf
+
+*.png   binary
+*.jpg   binary
+*.pkl   binary
+*.joblib binary
+*.db    binary
+*.parquet binary
+*.gz    binary

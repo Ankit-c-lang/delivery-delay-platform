@@ -1,0 +1,34 @@
+# Core (training) dependencies — PLAN.md §11.
+#
+# Unpinned for the first install only. Pin every direct dependency to an exact version
+# after the first successful install (`pip freeze > requirements.lock.txt`) and use the
+# lockfile in Docker and CI. Do not copy versions out of PLAN.md — install, then freeze
+# what actually resolves. A lockfile is only valid for the interpreter that produced it:
+# Python 3.12.
+
+pandas
+numpy
+scikit-learn
+scipy
+
+lightgbm
+xgboost
+catboost
+optuna
+shap
+
+mlflow
+
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+
+sqlalchemy
+psycopg2-binary
+pandera
+
+pyyaml
+python-dotenv
+joblib
+matplotlib

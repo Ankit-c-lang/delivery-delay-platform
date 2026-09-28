@@ -44,17 +44,28 @@ they exist. Anything else (a new Python dependency, a new container, a new servi
 explicit approval.
 
 ## Commands
-Created in Phase 0 — this list is aspirational until then:
+`make help` lists what actually exists. Each phase adds its own targets; a target whose
+module does not exist yet is not written (DECISIONS.md D15).
 
-- `make lint | format | test`
-- `make load-raw | build-orders | features`
-- `make train V=v1 | register | promote`
-- `make bootstrap` — the ordered first-run sequence (PLAN §18 A5). **Required before
+**Exist now (Phase 0):**
+- `make lint | format | test` — ruff + black + pytest
+- `make up | down | stop | ps | logs | health | psql`
+  `up` waits for both services to report `healthy`. `down` keeps volumes on purpose.
+
+**Arrive with their phase:**
+- `make load-raw` (1) · `build-orders` (2) · `features` (3)
+- `make train V=v1` (4) · `register` (6) · `promote` (9)
+- `make serve | bench` (7-8)
+- `make bootstrap` (8) — the ordered first-run sequence (PLAN §18 A5). **Required before
   `docker compose up` on a clean machine**, because the API resolves `@champion` at startup
   and the registry starts empty.
-- `make up | down | serve | bench`
 
 All Python entry points run through `.venv/bin/python -m src.x`.
+
+Only `requirements-dev.txt` plus `sqlalchemy psycopg2-binary pydantic pydantic-settings
+pyyaml` are installed so far. The full training stack installs in Phase 4; `requirements.txt`
+and `requirements-api.txt` are unproven until then. MLflow is reached over HTTP at
+`$MLFLOW_TRACKING_URI`, never by opening `mlflow/mlflow.db` directly (D12).
 
 ## Invariants (never break these)
 1. **PREDICTION-TIME CONTRACT:** only data available at `order_purchase_timestamp` may
@@ -114,4 +125,7 @@ splitting, Streamlit. If a change isn't in `PLAN.md`, ask before writing it.
 - Commit or push only when asked.
 
 ## Current phase
-**Phase 0 — Skeleton and environment.** Not yet started. Do not implement future phases.
+**Phase 0 — Skeleton and environment: built and verified locally; CI unverified** (nothing has
+been pushed yet, so the workflow has never run). **Next: push, confirm CI green, then Phase 1 —
+Raw load into Postgres.** Do not implement future phases. `PROGRESS.md` carries the detail,
+including what is *not* yet verified.

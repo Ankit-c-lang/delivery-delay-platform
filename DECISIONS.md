@@ -19,6 +19,10 @@ duplicated** — §18 is the authority, and two copies would drift apart.
 | [D9](#d9) | Grow the LV rather than resize the VMware disk | 2026-09-28 |
 | [D10](#d10) | Three living docs; generate `CLAUDE.md` | 2026-09-28 |
 | [D11](#d11) | No AI attribution in commit messages | 2026-09-28 |
+| [D12](#d12) | MLflow: the server owns the SQLite store; clients go over HTTP | 2026-09-28 |
+| [D13](#d13) | Compose healthchecks force TCP, avoid curl, and run MLflow as uid 1000 | 2026-09-28 |
+| [D14](#d14) | `requirements-dev.txt` standalone; `mlflow-skinny` for the API subset | 2026-09-28 |
+| [D15](#d15) | Added `Makefile` and pre-commit in Phase 0, with Phase 0 targets only | 2026-09-28 |
 
 ---
 
@@ -175,3 +179,105 @@ their messages were rewritten with `git filter-branch --msg-filter` and force-pu
 open pull requests, so nobody else's history was disturbed. Verified: every commit tree is
 identical before and after — only messages changed. The old SHAs are dead; the mapping is
 `d63c6c0` -> `a098948`, `8bce10c` -> `1d76389`, `17ec901` -> `80b9e21`.
+
+## D12
+### MLflow: the tracking server owns the SQLite store; clients talk HTTP
+**Decision.** The backend store `sqlite:////mlflow/mlflow.db` exists only inside the `mlflow`
+container. Everything else — training, promotion, the API — reaches MLflow through
+`MLFLOW_TRACKING_URI=http://127.0.0.1:5000`, and the server is started with
+`--serve-artifacts --artifacts-destination /mlartifacts` so artifact reads and writes are
+proxied through it too. The tracking URI lives in `.env`, deliberately **not** in
+`configs/base.yaml`, because it differs between the host (`127.0.0.1:5000`) and a container
+(`mlflow:5000`); `base.yaml` keeps only the experiment name, model name and aliases.
+
+**Why.** `PLAN.md` §7 says "tracking URI `sqlite:///mlflow.db`", which reads as if client code
+should open the SQLite file directly. That works exactly until something runs in a container:
+SQLite over a shared mount has no useful locking story, and the artifact URI recorded in a run
+would be a filesystem path that resolves on one side of the mount and not the other. Proxying
+proves it works — the default experiment reports
+`artifact_location: mlflow-artifacts:/0`, not `/mlartifacts/0`.
+
+**Rejected.** Pointing host code at the SQLite file (breaks as soon as Phase 8 containerizes
+anything, and it is the standard MLflow footgun). Postgres as the backend store (a second
+database for no gain; the registry needs *a* file/DB backend, not a good one).
+
+## D13
+### Compose healthchecks: force TCP for Postgres, avoid `curl` for MLflow, run MLflow as uid 1000
+**Decision.**
+
+```yaml
+postgres: test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+          interval 5s · timeout 5s · retries 10 · start_period 30s
+mlflow:   test: ["CMD", "python", "-c", "...urllib.request.urlopen('http://localhost:5000/health')..."]
+          interval 10s · timeout 5s · retries 5 · start_period 20s
+mlflow:   user: "1000:1000"
+```
+
+**Why, per line.**
+- `-h 127.0.0.1` is load-bearing. During `initdb` the official Postgres entrypoint runs a
+  *temporary* server with `--listen_addresses=''`, i.e. Unix socket only. A bare `pg_isready`
+  reaches that socket and reports healthy while the real server is still seconds away, so
+  anything with `condition: service_healthy` starts and gets `connection refused`. Forcing TCP
+  means the check can only pass once the real server is listening.
+- `$$` escapes the variable so Compose passes it through and the *container's* shell expands
+  it. A single `$` would interpolate on the host, at parse time, to an empty string.
+- `start_period: 30s` covers first-boot `initdb`; failures inside it do not count toward
+  `retries`. 5s × 10 retries after that is a generous ceiling for a restart.
+- Python, not `curl -f`, for MLflow: `ghcr.io/mlflow/mlflow` does not reliably ship `curl` or
+  `wget`, and a healthcheck whose binary is missing fails permanently while looking like a
+  service fault. `python` is guaranteed present in that image.
+- `user: "1000:1000"` keeps files written into the `./mlflow` and `./mlartifacts` bind mounts
+  owned by the host user. Without it `mlflow.db` and every artifact land root-owned and need
+  `sudo` to clean up. `id -u` is 1000 here. Postgres keeps its default user — it needs root to
+  drop privileges during `initdb`, and its data lives in a named volume anyway.
+
+**Rejected.** Bare `depends_on` (the race §10.2 explicitly warns about). `pg_isready` without
+`-h`. `curl -f http://localhost:5000/health`. Named volumes for MLflow — the run database and
+the artifacts are the project's record and should be readable from the host.
+
+## D14
+### `requirements-dev.txt` is standalone; the API subset uses `mlflow-skinny`
+**Decision.** `requirements-dev.txt` does **not** `-r requirements.txt`. `requirements-api.txt`
+lists `mlflow-skinny` instead of `mlflow`, and omits optuna, shap, matplotlib, pandera and
+catboost.
+
+**Why.** Phase 0 CI only lints. Making it install catboost, shap and matplotlib to run
+`ruff check` would add minutes to every push for nothing; from Phase 10 the job that runs
+pytest installs both files. And the API loads a registered pyfunc and resolves an alias — it
+never runs a tracking server or the UI, which is precisely what skinny drops. §11 already
+states the intent ("the API image should not carry the training stack; it roughly halves the
+image"); skinny is the mechanism.
+
+**Risk, recorded on purpose.** If the Phase 5 blend keeps CatBoost, `catboost` must go back
+into `requirements-api.txt` or the artifact will not load at serve time. Phase 8 must also
+prove a pyfunc loads under `mlflow-skinny` and measure the image-size difference — that
+number is the whole justification. Both caveats are written into
+`requirements-api.txt` itself, where whoever edits it next will see them.
+
+**Rejected.** `mlflow` in all three files (simpler, but then the API image carries the
+training stack and the §11 claim is false). One requirements file with extras.
+
+## D15
+### `Makefile` and pre-commit added in Phase 0, with Phase 0 targets only
+**Decision.** Created `Makefile` and `.pre-commit-config.yaml`, and installed the git hook.
+The `Makefile` carries only targets whose code exists: `lint format test up down stop ps logs
+psql health`. No `load-raw`, `train`, `promote`, `serve` or `bootstrap` yet. Whitespace hooks
+exclude `PLAN.md`.
+
+**Why.** Both files are in `PLAN.md` — the `Makefile` in the §12 tree, pre-commit in Phase 0's
+*Tasks* paragraph — but neither appears in Phase 0's numbered prompt, so this is a deliberate
+addition and is flagged for the user rather than assumed. A target that shells into a module
+that does not exist yet is worse than no target: it fails at the point where someone trusts
+it. `CLAUDE.md`'s Commands section is explicitly aspirational until the phases fill it in, and
+each phase adds its own targets. `check-added-large-files` (512 KB) and `detect-private-key`
+matter more here than the formatting hooks: the Olist data is CC BY-NC-SA and a committed
+`kaggle.json` would be permanent history. `PLAN.md` is excluded from the whitespace hooks
+because it is the frozen design document and a cosmetic rewrite would muddy any diff against
+the original plan.
+
+**Verified.** `pre-commit autoupdate` resolved the hook revisions to exactly the versions
+installed locally (ruff 0.16.9, black 26.5.1), so local and hook results cannot disagree. All
+10 hooks pass on every tracked file with zero modifications.
+
+**Rejected.** Deferring both to a later phase (pre-commit's value is catching things *before*
+the first push). Writing the full aspirational target list now with placeholder bodies.

@@ -1,0 +1,30 @@
+# Serving-only subset — PLAN.md §11. The API image must not carry the training stack.
+#
+# Excluded on purpose: optuna, shap, matplotlib, pandera, catboost.
+#
+# mlflow-skinny, not mlflow: the API loads a registered pyfunc and resolves an alias, it
+# never runs a tracking server or the UI. Skinny drops those dependencies. Verify in
+# Phase 8 that the pyfunc still loads under it, and measure the image size difference —
+# that number is the justification.
+#
+# CAVEAT: if the final Phase 5 blend includes CatBoost, catboost must be added back here
+# or the artifact will not load at serve time. Revisit when the blend is fixed.
+
+mlflow-skinny
+
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+
+pandas
+numpy
+scikit-learn
+lightgbm
+xgboost
+
+sqlalchemy
+psycopg2-binary
+pyyaml
+python-dotenv
+joblib

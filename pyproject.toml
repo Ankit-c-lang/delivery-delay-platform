@@ -1,0 +1,50 @@
+[project]
+name = "delivery-delay-platform"
+version = "0.1.0"
+description = "Leakage-safe delivery-delay prediction with a full MLOps lifecycle"
+requires-python = ">=3.12"
+
+# Dependencies are deliberately NOT declared here. PLAN.md §11 keeps them in three
+# requirements files so the API image can install a serving-only subset; duplicating them
+# in a [project.dependencies] table would create a second source of truth.
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "api", "tests", "scripts"]
+extend-exclude = ["notebooks", ".venv"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "W",   # pycodestyle warnings
+    "I",   # isort
+    "N",   # pep8-naming
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "SIM", # flake8-simplify
+    "PTH", # flake8-use-pathlib
+    "RUF", # ruff-specific
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Assertions and reused fixtures are the point of a test file.
+"tests/*" = ["S101"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["src", "api"]
+
+[tool.black]
+line-length = 100
+target-version = ["py312"]
+extend-exclude = "notebooks"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers --cov=src --cov-report=term-missing"
+markers = [
+    "slow: needs the real dataset or a full training run; excluded from CI",
+    "integration: needs a live Postgres or MLflow server",
+]
