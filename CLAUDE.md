@@ -53,9 +53,9 @@ module does not exist yet is not written (DECISIONS.md D15).
 - `make up | down | stop | ps | logs | health | psql`
   `up` waits for both services to report `healthy`. `down` keeps volumes on purpose.
 - `make check-data | load-raw | build-orders` and `make etl` for all three in order
+- `make snapshots` (as-of snapshots) · `make features` (fit the artifact, build the matrix)
 
 **Arrive with their phase:**
-- `make snapshots` exists (Phase 3 part A). `make features` arrives with part B.
 - `make train V=v1` (4) · `register` (6) · `promote` (9)
 - `make serve | bench` (7-8)
 - `make bootstrap` (8) — the ordered first-run sequence (PLAN §18 A5). **Required before
@@ -103,6 +103,13 @@ pydantic-settings pyyaml pandas pandera` (pandas 3.0.6, pandera 0.33.1 — note 
     in `src/etl/schema.py`. **`src/features/history.py` is the only module that may read
     `order_outcomes`** (DECISIONS.md D19). It also carries `order_delivered_carrier_date`,
     `delivery_days` and `handling_days` for the §4.5 aggregates.
+13. **The feature matrix comes only from `PreprocessingArtifact`.** Nothing outside
+    `src/features/artifact.py` may fit an imputation value, a category level set or a
+    winsorisation bound. `fit` is a classmethod, there is no `fit_transform`, and the
+    artifact is frozen — Phase 5 adds its calibrator via `with_decision`, which returns a new
+    artifact. Training uses `transform_with_snapshots`, serving uses `transform`; the two
+    names are the §18 A6 asymmetry made visible (DECISIONS.md D23). The matrix is **not**
+    persisted as a table — recompute it (D24).
 
 ## Out of scope (do not add)
 Airflow, Prefect, Dagster, Kafka, Kubernetes, Terraform, Spark, a feature store, a vector
@@ -134,12 +141,15 @@ splitting, Streamlit. If a change isn't in `PLAN.md`, ask before writing it.
 - Commit or push only when asked.
 
 ## Current phase
-**Phases 0-2 complete. Phase 3 part A complete** (as-of snapshots). 111 tests pass.
+**Phases 0-2 complete. Phase 3 parts A and B complete.** 162 tests pass, 84% coverage.
 `raw` holds 9 tables / 1,550,922 rows; `features.orders_analytical` holds 96,203 rows at a 6.79%
-`is_late` rate; six snapshot tables hold 34,427 rows.
+`is_late` rate; six snapshot tables hold 34,427 rows; the **39-feature** matrix and a fitted
+`PreprocessingArtifact` build in ~4 s via `make features`.
 
-**Next: Phase 3 part B — `src/features/build.py` and `src/features/artifact.py`, then part C —
-`src/splits.py`. PLAN.md §13 says these are separate prompts: do not combine them.**
+**Next: Phase 3 part C — `src/splits.py`, reading `configs/splits.yaml`, with the
+`max(train.purchase) < min(val.purchase) < min(evaluation.purchase)` assertion. PLAN.md §13 says
+it is a separate prompt.** `src/features/build.py::fit_window` reads `splits.yaml` inline as a
+stand-in and should be deleted when `splits.py` lands.
 
 Do not implement future phases. `PROGRESS.md` carries the detail. Two findings govern later
 phases: **D20** (base-rate shift, Phases 5 and 9) and **D22** (the history features are weak,

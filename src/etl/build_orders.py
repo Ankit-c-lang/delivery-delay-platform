@@ -74,6 +74,10 @@ ANALYTICAL_COLUMNS: tuple[tuple[str, str], ...] = (
     ("total_freight", "NUMERIC(12, 2) NOT NULL"),
     ("total_weight_g", "DOUBLE PRECISION"),
     ("total_volume_cm3", "DOUBLE PRECISION"),
+    # §5 F4 wants the heaviest and bulkiest single item as well as the totals: a 20 kg item
+    # in a 21-item order behaves differently from 21 items of 1 kg.
+    ("max_item_weight_g", "DOUBLE PRECISION"),
+    ("max_item_volume_cm3", "DOUBLE PRECISION"),
     ("dominant_category", "TEXT"),
     ("dominant_category_english", "TEXT"),
     ("max_shipping_limit_date", "TIMESTAMP NOT NULL"),
@@ -129,6 +133,12 @@ item_agg AS (
                * pr.product_height_cm
                * pr.product_width_cm
            )                                   AS total_volume_cm3,
+           max(pr.product_weight_g)::double precision AS max_item_weight_g,
+           max(
+               pr.product_length_cm::double precision
+               * pr.product_height_cm
+               * pr.product_width_cm
+           )                                   AS max_item_volume_cm3,
            max(i.shipping_limit_date)          AS max_shipping_limit_date
     FROM population p
     JOIN raw.order_items i  ON i.order_id   = p.order_id
@@ -240,6 +250,8 @@ SELECT p.order_id,
        ia.total_freight,
        ia.total_weight_g,
        ia.total_volume_cm3,
+       ia.max_item_weight_g,
+       ia.max_item_volume_cm3,
        dc.category                                            AS dominant_category,
        COALESCE(tr.product_category_name_english, dc.category) AS dominant_category_english,
        ia.max_shipping_limit_date,

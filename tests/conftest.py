@@ -151,6 +151,8 @@ def minimal_frame() -> pd.DataFrame:
         "total_freight": np.full(n, 10.0),
         "total_weight_g": np.full(n, 500.0),
         "total_volume_cm3": np.full(n, 1000.0),
+        "max_item_weight_g": np.full(n, 500.0),
+        "max_item_volume_cm3": np.full(n, 1000.0),
         "dominant_category": ["cama_mesa_banho"] * n,
         "dominant_category_english": ["bed_bath_table"] * n,
         "max_shipping_limit_date": purchase + pd.Timedelta(days=5),

@@ -8,6 +8,9 @@ mlflow/
 mlartifacts/
 mlruns/
 
+# --- Fitted artifacts (Phase 6 logs these to MLflow; local copies are regenerable) ---
+artifacts/
+
 # --- Secrets ------------------------------------------------------------------
 .env
 .env.*
@@ -50,6 +53,7 @@ reports/*
 !reports/raw_load_reconciliation.md
 !reports/etl_funnel.md
 !reports/as_of_snapshots.md
+!reports/feature_matrix.md
 *.png
 !docs/**/*.png
 

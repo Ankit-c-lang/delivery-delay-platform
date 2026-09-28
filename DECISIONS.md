@@ -30,6 +30,8 @@ duplicated** — §18 is the authority, and two copies would drift apart.
 | [D20](#d20) | The late rate is strongly non-stationary across the §4.4 windows | 2026-09-28 |
 | [D21](#d21) | `ANALYZE` explicitly after every bulk load | 2026-09-28 |
 | [D22](#d22) | The as-of history features are weak, and that is the correct answer | 2026-09-28 |
+| [D23](#d23) | The §18 A6 asymmetry is two named methods, not an optional argument | 2026-09-28 |
+| [D24](#d24) | The feature matrix is not persisted as a table | 2026-09-28 |
 
 ---
 
@@ -544,3 +546,64 @@ statement about the feature vector, not a prediction.
   mean the snapshot join regressed.
 - *Phase 11:* "I removed a leak and watched my best feature family lose half its apparent power"
   is a better interview answer than any metric in this project.
+
+## D23
+### The §18 A6 asymmetry is two named methods, not an optional argument
+**Decision.** `PreprocessingArtifact` exposes two transform methods:
+
+| Method | Snapshot used | Path |
+|---|---|---|
+| `transform_with_snapshots(orders, snapshots)` | each order's **own purchase month** | training |
+| `transform(orders)` | the **single latest bundled** snapshot | serving |
+
+**Why not one method with a flag.** §18 A6 accepts that training and serving select snapshots
+differently, because a live request has no history table to join to. An optional
+`snapshots=None` argument would make the safe default invisible at the call site and the unsafe
+one a typo away. Two names mean every call site states which semantics it wants, and a reviewer
+can `grep` for `transform(` to find every place the bundled snapshot is used.
+
+**Two tests hold the claim honest.** One forces every order's purchase month to the artifact's
+bundled snapshot month and asserts the two paths then produce *byte-identical* frames — that is
+what "snapshot selection is the only difference" means, and if it failed the asymmetry would be
+wider than A6 admits. The mirror test asserts they *do* differ when the months differ, so the
+first test cannot pass vacuously.
+
+**Related artifact decisions, same commit.**
+- **Frozen dataclass.** `fit` is a *classmethod* and there is no `fit_transform` anywhere, so no
+  instance can refit itself — §6.2 asks for exactly this. Phase 5 attaches its calibrator and
+  threshold through `with_decision`, which returns a **new** artifact, so one already logged to
+  MLflow cannot drift under a run that referenced it.
+- **`__missing__` is kept distinct from `__unknown__`.** "No category recorded" (1,330 orders)
+  and "a category new since training" are different facts; collapsing them would hide a growing
+  catalogue behind a data-quality problem.
+- **`customer_region` uses all five IBGE macro-regions**, not whatever the training window
+  contained, because the set is fixed and known. A training window with no northern customer
+  must still be able to *encode* one.
+- **A schema hash on load.** `load()` refuses an artifact whose expected input columns, feature
+  names or order differ from the running code. A mismatch is precisely the train/serve skew this
+  class exists to prevent, so it must fail loudly rather than serve one wrong prediction.
+
+**§18 A4 is now closed with a number.** A4 asked for two things: winsorise the
+`days_to_shipping_limit` tail, and audit its collinearity with `promised_days`. Measured on the
+v1 fit window the correlation is **0.271** raw and **0.388** after winsorising at 30 days —
+moderate, not near-collinear, so **both features stay**. The tail is winsorised at the training
+q99.5, which is **21.22 days** against a maximum of 1,052.
+
+## D24
+### The feature matrix is not persisted as a table
+**Decision.** `make features` fits and saves the artifact; it does **not** write a
+`features.feature_matrix` table. Phase 4 recomputes the matrix through the artifact.
+
+**Why.** A stored matrix and the artifact that produced it can drift apart, and nothing would
+notice: refit the artifact, forget to rebuild the table, and training silently uses features
+from a previous fitting. Recomputing costs about 1 second for 96,203 rows and exercises the
+artifact on every single run, which means the Phase 7 parity path is being tested continuously
+rather than only in Phase 7.
+
+**Rejected.** Persisting the matrix for speed. There is no speed problem to solve — the
+transform is ~1 s — and the staleness class of bug is the expensive kind, because it produces
+plausible numbers.
+
+**Consequence for Phase 4.** Call `build_matrix(version)` or
+`artifact.transform_with_snapshots(...)`; do not look for a matrix table. The labels come from
+`features.order_outcomes`, already aligned by `order_id`.

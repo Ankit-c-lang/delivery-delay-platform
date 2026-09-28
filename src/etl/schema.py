@@ -92,6 +92,9 @@ ORDERS_ANALYTICAL_SCHEMA = pa.DataFrameSchema(
         # Nullable: 18 item rows carry no weight or dimensions at all.
         "total_weight_g": pa.Column(float, pa.Check.ge(0), nullable=True),
         "total_volume_cm3": pa.Column(float, pa.Check.ge(0), nullable=True),
+        # Measured: some products record 0 g, so the bound is ge(0) not gt(0).
+        "max_item_weight_g": pa.Column(float, pa.Check.ge(0), nullable=True),
+        "max_item_volume_cm3": pa.Column(float, pa.Check.gt(0), nullable=True),
         # Nullable: 1,535 item rows have no product category.
         "dominant_category": pa.Column(str, nullable=True),
         "dominant_category_english": pa.Column(str, nullable=True),

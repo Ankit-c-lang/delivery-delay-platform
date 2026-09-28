@@ -48,3 +48,8 @@ markers = [
     "slow: needs the real dataset or a full training run; excluded from CI",
     "integration: needs a live Postgres or MLflow server",
 ]
+filterwarnings = [
+    # Fail on pytest's own removal warnings. These are always our mistake, never a
+    # third-party one, and a silent one costs a broken suite on the next pytest major.
+    "error::pytest.PytestRemovedIn10Warning",
+]

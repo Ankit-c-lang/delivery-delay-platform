@@ -5,26 +5,64 @@ that task. Source of truth for *what* to build is `PLAN.md`; this file only trac
 are*. Decisions and their reasons live in `DECISIONS.md`.
 
 - **Plan version:** v1 (2026-09-28) + amendments §18 · **Pre-flight completed:** 2026-09-28
-- **Current phase:** Phase 3 — As-of aggregates and feature assembly · **part A of 3 complete**
-  (snapshots). Parts B (`build.py` + `artifact.py`) and C (`splits.py`) remain; §13 says they are
-  separate prompts and must not be combined.
-- **Overall:** 3 / 12 phases · Phase 3 is ~40% done · 111 tests green, 85% coverage
-- **Estimated remaining:** ~31 h of build work (PLAN §3 budget: 36-42 h)
+- **Current phase:** Phase 3 — As-of aggregates and feature assembly · **parts A and B of 3
+  complete**. Part C (`src/splits.py`) remains; §13 says it is a separate prompt.
+- **Overall:** 3 / 12 phases · Phase 3 is ~85% done · 162 tests green, 84% coverage
+- **Estimated remaining:** ~29 h of build work (PLAN §3 budget: 36-42 h)
 
 ---
 
 ## Currently working on
 
-**Nothing in flight.** Phase 3 **part A** is complete: `src/features/history.py`, the
-leakage-critical module.
+**Nothing in flight.** Phase 3 **parts A and B** are complete.
 
-Six snapshot tables, 34,427 rows, built in **3.2 s**. 29 new tests (111 total, 85% coverage);
-22 of the new ones are synthetic and need no database, because a hand-built entity with a known
-history is the only way to prove the month boundary is exactly right rather than approximately
-right.
+`make features` fits a `PreprocessingArtifact` on the 36,174-row v1 window and produces a
+**96,203 x 39** feature matrix in about 4 s. 51 new tests (162 total, 84% coverage); 43 of the
+new ones need no database.
 
-**Written test-first, as §13 Phase 3 requires.** The tests defined the module's API before any
-implementation existed, and all 22 synthetic ones passed on the first run of the finished code.
+**The 39 features, all eight families of §5:** F1 promise and timing 6 · F2 geography 7 · F3
+order composition 6 · F4 product physical 6 · F5 payment 4 · F6 seller history 5 · F7 route
+history 3 · F8 category history 2. Inventory and per-feature null counts in
+`reports/feature_matrix.md`.
+
+**The §4.2 prediction-time contract is the module docstring of `src/features/build.py`**, as
+§4.2 requires, and `construct_features` raises if a denylist column is present on its input
+frame — a join upstream could pull the delivery date back in, and nothing else would notice.
+
+**§18 A6 is two named methods, not a flag.** `transform_with_snapshots` (training, each order's
+own purchase month) and `transform` (serving, the single latest bundled snapshot). Two tests hold
+the claim honest: forcing every order's purchase month to the bundled month makes the two paths
+produce **byte-identical** frames, and a mirror test asserts they *do* differ when the months
+differ, so the first cannot pass vacuously. See `DECISIONS.md` D23.
+
+**§18 A4 is closed with a number.** `days_to_shipping_limit` correlates **0.271** with
+`promised_days` on the v1 fit window (0.388 winsorised at 30 days) — moderate, not
+near-collinear, so **both features stay**. The 1,052-day tail is winsorised at the training
+q99.5, which is 21.22 days.
+
+### Three things worth knowing about part B
+
+- **Phase 2 needed extending a third time.** §5 F4 wants `max_item_weight_g` and
+  `max_item_volume_cm3`, which are order-level aggregates of items — so they belong in
+  `orders_analytical`, which is now 40 columns. A pattern has emerged: the plan puts
+  feature *selection* in Phase 3 but item *aggregation* in Phase 2, so each new §5 family can
+  reach back. Worth expecting once more in Phase 4's audit.
+- **The matrix is deliberately not persisted** (`DECISIONS.md` D24). A stored matrix and the
+  artifact that produced it can drift apart silently; recomputing costs ~1 s and exercises the
+  artifact on every run, so the Phase 7 parity path is tested continuously.
+- **A real pytest deprecation was fixed, not silenced.** A class-scoped fixture defined as an
+  instance method breaks in pytest 10. Fixed with `@staticmethod`, and
+  `error::pytest.PytestRemovedIn10Warning` is now a hard failure in `pyproject.toml` — that
+  warning class is always our own mistake, never a third party's.
+
+### The 750 rows with no history at all
+
+Pre-imputation, seven history features are null for exactly **750** orders — every order
+purchased in 2017-01, the first month, which has zero resolved orders at *any* level. A test
+asserts both the count and that they are all from that month. Those rows are warm-up, never
+training rows, which is precisely why §4.4 reserves 2017-01 → 04.
+
+---
 
 ### The headline finding: the history features are weak, and that is correct
 
@@ -200,37 +238,33 @@ filter and §4.5's snapshot rule:
 
 ## Next up (in order)
 
-**Phase 3 part B — `src/features/build.py` and `src/features/artifact.py`** (PLAN §13 Phase 3,
-second prompt). §13 is explicit: *"Then a second prompt for `build.py` + `artifact.py`, and a
-third for `splits.py`. Do not combine them."*
+**Phase 3 part C — `src/splits.py`** (PLAN §13 Phase 3, third prompt). §13: *"Do not combine
+them."*
 
-Read `PLAN.md` §5 and §6.2 first.
+Small and well specified:
+- Read `configs/splits.yaml`, which is keyed **per version** (§18 A2).
+- Return the fit / calibrate / promotion-evaluation windows for a version.
+- **The §6.6 assertion:** `max(train.purchase) < min(val.purchase) < min(evaluation.purchase)`.
+- It must be the **only** module that loads the 2018-05 → 08 window, and only via the promotion
+  gate (§18 A3). `src/evaluation/score_holdout.py` is Phase 9.
+- **Delete `src/features/build.py::fit_window`** when this lands — it reads `splits.yaml` inline
+  as a stand-in and is marked as such in its docstring.
 
-**What part A already provides:**
-- `attach_history(orders, snapshots)` returns all four metrics per entity family plus
-  `{entity}_is_new`. That is **15 columns**; §5 wants only **10** of them as features (F6 has 5,
-  F7 has 3, F8 has 2). Part B selects; part A deliberately does not.
-- `snapshot_months`, `build_snapshots`, `build_all_snapshots`, `write_snapshots` and the six
-  tables, all keyed `(entity, snapshot_month)`.
+**Then Phase 4 — Baselines and single models** (~4 h). Carry in:
+- The **full dependency install** lands here (~3 GB). `docker compose stop` the
+  `realtime-fraud-detection` stack first — 7.7 GB total RAM, and CatBoost on 10 threads is the
+  real contention point (`CLAUDE.md` invariant 10).
+- **D22:** expect `promised_days` to dominate and F6/F7/F8 to contribute little. A dominant
+  `seller_late_rate_hist` is a **leakage alarm**, not a win — with the correct rule it correlates
+  at only +0.02.
+- `category_late_rate_hist` at −0.006 is the first candidate for §5's "drop 1-3 dead features".
+  Decide on permutation importance, not correlation alone.
+- No matrix table exists: call `build_matrix(version)` (D24). Labels come from
+  `features.order_outcomes`, aligned by `order_id`.
+- `TimeSeriesSplit` only; `KFold` and `StratifiedKFold` are forbidden (`CLAUDE.md` invariant 5).
 
-**Still to build in part B:** the other seven families of §5 (F1-F5), the top-30 category cap
-with `other`, `freight_ratio` with a price-zero guard, `customer_region` from state,
-`customer_zip_prefix_2`, `max_item_weight_g` / `max_item_volume_cm3` / `avg_density` (none of
-which are in `orders_analytical` yet — they need the item level, so Part B must revisit
-`raw.order_items`), and `PreprocessingArtifact` with fit/transform/save/load.
-
-**Carry into part B:**
-- `days_to_shipping_limit` is raw, 2.00 to 1052.00 days. Winsorize the tail and audit
-  near-collinearity with `promised_days` (§18 A4).
-- 1,330 orders have no `dominant_category`; 16 have no weight or volume.
-- Column order must match the artifact's stored list exactly (§6.6), and `transform()` twice on
-  the same input must be identical.
-
-**Then part C — `src/splits.py`** reading `configs/splits.yaml`, with the
-`max(train.purchase) < min(val.purchase) < min(evaluation.purchase)` assertion.
-
-**Start of session:** `make up`, then `make etl && make snapshots` if the volume is fresh
-(21.6 s + 3.2 s, measured). Credentials are already in `.env`.
+**Start of session:** `make up`, then `make etl && make features` if the volume is fresh
+(21.6 s + 3.2 s + 4 s, measured). Credentials are already in `.env`.
 
 ---
 
@@ -379,6 +413,33 @@ argument in the open.
 volume would tell the model a brand-new seller has a long track record — the opposite of true,
 and it would make `order_count` an anti-signal exactly where `is_new` is trying to help.
 
+### Phase 3 part B — Feature assembly and the preprocessing artifact — ✅ COMPLETE (2026-09-28)
+
+| # | Item | Verified by |
+|---|---|---|
+| 1 | `src/features/build.py` — the 39 features of §5, stateless, §4.2 contract as its docstring | 39 columns in a fixed order; raises on a denylist column or a missing input |
+| 2 | `src/features/artifact.py` — `PreprocessingArtifact` with fit / transform / save / load | frozen dataclass, `fit` a classmethod, **no `fit_transform`**; 454 KB on disk |
+| 3 | `tests/test_features_build.py` | 51 tests, 43 needing no database |
+| 4 | `make features` | fits on 36,174 v1 rows, transforms 96,203, ~4 s |
+
+**Artifact contents, per §6.2:** 30 numeric medians · 6 frozen category level sets with
+`__missing__` and `__unknown__` kept distinct · winsorisation bounds · the six latest snapshot
+tables · zip and state centroids · the ordered 39-name feature list · train cutoff
+`2017-12-31 23:29:31` · schema hash `03522e4226b5dc31`. Calibrator and threshold are `None` until
+Phase 5 attaches them through `with_decision`, which returns a **new** artifact so one already
+logged to MLflow cannot drift.
+
+**Category levels, fitted on training rows only:** `product_category` capped to the 30 most
+frequent, covering **95.80%** of training rows, with the remaining 42 collapsing to
+`__unknown__`. `customer_region` uses all five IBGE macro-regions rather than whatever training
+contained, because the set is fixed and a window with no northern customer must still be able to
+encode one. `seller_state` has fewer levels than `customer_state` — sellers are concentrated, so
+an order from an unusual seller state legitimately encodes as unknown.
+
+**Load-time guards:** `load()` refuses an artifact whose version differs, and refuses one whose
+input-schema hash no longer matches the running code. A hash mismatch is exactly the train/serve
+skew the class exists to prevent, so it fails rather than serving one wrong prediction.
+
 ---
 
 ## Remaining work
@@ -388,7 +449,7 @@ and it would make `order_count` an anti-signal exactly where `is_new` is trying 
 | 0 | Skeleton and environment | 1.5 h | easy | ✅ **complete** · CI green |
 | 1 | Raw load into Postgres | 2.5 h | easy-med | ✅ **complete** · 33 tests |
 | 2 | Transform, validate, analytical table | 4 h | medium | ✅ **complete** · 80 tests |
-| 3 | As-of aggregates and feature assembly | 5 h | **hardest** | **part A done** · B and C next |
+| 3 | As-of aggregates and feature assembly | 5 h | **hardest** | **parts A+B done** · C (`splits.py`) next |
 | 4 | Baselines and single models | 4 h | medium | full dependency install lands here · ⚠️ D22: a dominant `seller_late_rate_hist` is a leakage alarm |
 | 5 | Ensemble, calibration, threshold | 4 h | medium | ⚠️ base-rate shift (D20); fixes whether CatBoost must re-enter `requirements-api.txt` (D14) |
 | 6 | MLflow, pyfunc wrapper, registry | 4 h | medium | |
