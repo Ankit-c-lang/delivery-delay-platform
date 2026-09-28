@@ -5,62 +5,54 @@ that task. Source of truth for *what* to build is `PLAN.md`; this file only trac
 are*. Decisions and their reasons live in `DECISIONS.md`.
 
 - **Plan version:** v1 (2026-09-28) + amendments §18 · **Pre-flight completed:** 2026-09-28
-- **Current phase:** Phase 3 — As-of aggregates and feature assembly · **parts A and B of 3
-  complete**. Part C (`src/splits.py`) remains; §13 says it is a separate prompt.
-- **Overall:** 3 / 12 phases · Phase 3 is ~85% done · 162 tests green, 84% coverage
-- **Estimated remaining:** ~29 h of build work (PLAN §3 budget: 36-42 h)
+- **Current phase:** Phase 3 — As-of aggregates and feature assembly · **✅ COMPLETE**
+  (all three parts). This was the plan's hardest phase.
+- **Overall:** **4 / 12 phases** · 204 tests green, 86% coverage
+- **Estimated remaining:** ~28 h of build work (PLAN §3 budget: 36-42 h)
 
 ---
 
 ## Currently working on
 
-**Nothing in flight.** Phase 3 **parts A and B** are complete.
+**Nothing in flight. Phase 3 is complete — all three parts.**
 
-`make features` fits a `PreprocessingArtifact` on the 36,174-row v1 window and produces a
-**96,203 x 39** feature matrix in about 4 s. 51 new tests (162 total, 84% coverage); 43 of the
-new ones need no database.
+Part C added `src/splits.py`: the only reader of `configs/splits.yaml`, so no boundary is
+written twice anywhere in the project. 38 new tests (204 total, 86% coverage; `splits.py` at
+95%).
 
-**The 39 features, all eight families of §5:** F1 promise and timing 6 · F2 geography 7 · F3
-order composition 6 · F4 product physical 6 · F5 payment 4 · F6 seller history 5 · F7 route
-history 3 · F8 category history 2. Inventory and per-feature null counts in
-`reports/feature_matrix.md`.
+**The promotion evaluation window is locked at runtime**, which is what §4.4 asks for.
+`promotion_evaluation_window()` raises unless the caller entered
+`unlock_promotion_evaluation()` and named itself as `src.evaluation.score_holdout` or
+`src.registry.promote`. The guard protects the **dates**, not just the loading code, because
+the realistic mistake is a stray `orders[orders.purchase >= "2018-05-01"]` in a training
+notebook. It re-locks in a `finally`, refuses nesting, and its error message names
+`tests/fixtures/` — a guard that blocks without saying what to do instead gets worked around.
+`promotion_evaluation_starts_on()` is readable **without** unlocking, so the §6.6 ordering
+assertion never has to defeat the guard to do its job. See `DECISIONS.md` D25.
 
-**The §4.2 prediction-time contract is the module docstring of `src/features/build.py`**, as
-§4.2 requires, and `construct_features` raises if a denylist column is present on its input
-frame — a join upstream could pull the delivery date back in, and nothing else would notice.
+**§18 A3's "by import inspection" is done now, not deferred to Phase 9.** Two tests: no module
+in `src/` outside the authorised set mentions `promotion_evaluation_window`, and no module
+hardcodes a date inside the window.
 
-**§18 A6 is two named methods, not a flag.** `transform_with_snapshots` (training, each order's
-own purchase month) and `transform` (serving, the single latest bundled snapshot). Two tests hold
-the claim honest: forcing every order's purchase month to the bundled month makes the two paths
-produce **byte-identical** frames, and a mirror test asserts they *do* differ when the months
-differ, so the first cannot pass vacuously. See `DECISIONS.md` D23.
+**The §6.6 ordering line now runs on every build**, not only in tests:
 
-**§18 A4 is closed with a number.** `days_to_shipping_limit` correlates **0.271** with
-`promised_days` on the v1 fit window (0.388 winsorised at 30 days) — moderate, not
-near-collinear, so **both features stay**. The 1,052-day tail is winsorised at the training
-q99.5, which is 21.22 days.
+| Version | max fit purchase | min calibrate | max calibrate | evaluation starts |
+|---|---|---|---|---|
+| v1 | 2017-12-31 23:29:31 | 2018-01-01 02:48:41 | 2018-02-28 23:57:55 | 2018-05-01 |
+| v2 | 2018-02-28 23:57:55 | 2018-03-01 00:00:00 | 2018-04-30 23:47:26 | 2018-05-01 |
 
-### Three things worth knowing about part B
+v2's boundary is tight — 2 minutes — and holds strictly. `build_matrix` asserts it before
+fitting, because a drifted split should stop the build rather than quietly train a model.
 
-- **Phase 2 needed extending a third time.** §5 F4 wants `max_item_weight_g` and
-  `max_item_volume_cm3`, which are order-level aggregates of items — so they belong in
-  `orders_analytical`, which is now 40 columns. A pattern has emerged: the plan puts
-  feature *selection* in Phase 3 but item *aggregation* in Phase 2, so each new §5 family can
-  reach back. Worth expecting once more in Phase 4's audit.
-- **The matrix is deliberately not persisted** (`DECISIONS.md` D24). A stored matrix and the
-  artifact that produced it can drift apart silently; recomputing costs ~1 s and exercises the
-  artifact on every run, so the Phase 7 parity path is tested continuously.
-- **A real pytest deprecation was fixed, not silenced.** A class-scoped fixture defined as an
-  instance method breaks in pytest 10. Fixed with `@staticmethod`, and
-  `error::pytest.PytestRemovedIn10Warning` is now a hard failure in `pyproject.toml` — that
-  warning class is always our own mistake, never a third party's.
+**Cleanup done:** `src/features/build.py::fit_window`, the inline stand-in from part B, is
+deleted.
 
-### The 750 rows with no history at all
+### One of my own tests was wrong and got rewritten
 
-Pre-imputation, seven history features are null for exactly **750** orders — every order
-purchased in 2017-01, the first month, which has zero resolved orders at *any* level. A test
-asserts both the count and that they are all from that month. Those rows are warm-up, never
-training rows, which is precisely why §4.4 reserves 2017-01 → 04.
+The "no hardcoded evaluation date" test scanned line by line and flagged `src/splits.py`'s own
+docstring — the sentence describing the mistake to avoid. Rewritten with `ast` so it inspects
+**code string literals** and skips docstrings. A test that cannot tell prose from code would
+have trained people to ignore it.
 
 ---
 
@@ -238,33 +230,34 @@ filter and §4.5's snapshot rule:
 
 ## Next up (in order)
 
-**Phase 3 part C — `src/splits.py`** (PLAN §13 Phase 3, third prompt). §13: *"Do not combine
-them."*
+**Phase 4 — Baselines and single models** (PLAN §13 Phase 4, ~4 h, medium). Read `PLAN.md`
+§6.3, §6.4 and §13 Phase 4 first.
 
-Small and well specified:
-- Read `configs/splits.yaml`, which is keyed **per version** (§18 A2).
-- Return the fit / calibrate / promotion-evaluation windows for a version.
-- **The §6.6 assertion:** `max(train.purchase) < min(val.purchase) < min(evaluation.purchase)`.
-- It must be the **only** module that loads the 2018-05 → 08 window, and only via the promotion
-  gate (§18 A3). `src/evaluation/score_holdout.py` is Phase 9.
-- **Delete `src/features/build.py::fit_window`** when this lands — it reads `splits.yaml` inline
-  as a stand-in and is marked as such in its docstring.
+**Two things to do before writing any code:**
+1. **`docker compose stop` the `realtime-fraud-detection` stack.** Phase 4 installs the full
+   ~3 GB modelling stack and tunes CatBoost on 10 threads in 7.7 GB of total RAM. This is the
+   contention point `CLAUDE.md` invariant 10 warns about, and the one phase where it matters.
+2. `make up && make etl && make features` if the Postgres volume is fresh (~29 s end to end).
 
-**Then Phase 4 — Baselines and single models** (~4 h). Carry in:
-- The **full dependency install** lands here (~3 GB). `docker compose stop` the
-  `realtime-fraud-detection` stack first — 7.7 GB total RAM, and CatBoost on 10 threads is the
-  real contention point (`CLAUDE.md` invariant 10).
-- **D22:** expect `promised_days` to dominate and F6/F7/F8 to contribute little. A dominant
-  `seller_late_rate_hist` is a **leakage alarm**, not a win — with the correct rule it correlates
-  at only +0.02.
+**Carry into Phase 4:**
+- **D22 is the headline.** Expect `promised_days` to dominate and F6/F7/F8 to contribute little.
+  **A dominant `seller_late_rate_hist` is a leakage alarm, not a win** — with the correct §18 A1
+  rule it correlates at only +0.02 with the target.
 - `category_late_rate_hist` at −0.006 is the first candidate for §5's "drop 1-3 dead features".
-  Decide on permutation importance, not correlation alone.
-- No matrix table exists: call `build_matrix(version)` (D24). Labels come from
+  Decide on permutation importance, not correlation alone, and report the surviving count
+  honestly.
+- **There is no feature-matrix table.** Call `build_matrix(version)` (D24); labels come from
   `features.order_outcomes`, aligned by `order_id`.
-- `TimeSeriesSplit` only; `KFold` and `StratifiedKFold` are forbidden (`CLAUDE.md` invariant 5).
+- `TimeSeriesSplit(n_splits=4)` only. `KFold` and `StratifiedKFold` are forbidden (invariant 5),
+  and early stopping uses each fold's own validation slice, not the calibration window (§6.3).
+- Use native categorical handling, not one-hot: the matrix already carries `category` dtype on
+  all six categorical features (§6.1).
+- Report the trivial baseline explicitly — predict never-late gives ~93% accuracy and 0% recall.
+  It is the cleanest way to show why accuracy is the wrong metric here (§4.6).
+- **Lead with PR-AUC.** With ~7% positives, ROC-AUC flatters.
 
-**Start of session:** `make up`, then `make etl && make features` if the volume is fresh
-(21.6 s + 3.2 s + 4 s, measured). Credentials are already in `.env`.
+**Expect a fourth Phase 2 extension.** Each new §5 family so far has needed an order-level
+aggregate that lives in `orders_analytical`; the feature audit may want one more.
 
 ---
 
@@ -440,6 +433,23 @@ an order from an unusual seller state legitimately encodes as unknown.
 input-schema hash no longer matches the running code. A hash mismatch is exactly the train/serve
 skew the class exists to prevent, so it fails rather than serving one wrong prediction.
 
+### Phase 3 part C — Time splits and the evaluation lock — ✅ COMPLETE (2026-09-28)
+
+| # | Item | Verified by |
+|---|---|---|
+| 1 | `src/splits.py` — sole reader of `configs/splits.yaml`, per-version windows | both versions' windows returned and proven disjoint |
+| 2 | The §6.6 assertion `max(fit) < min(calibrate) < evaluation.start` | holds for v1 and v2 on real data; runs on every `make features` |
+| 3 | Runtime lock on the 2018-05 → 08 window (§4.4, §18 A3) | locked by default, refuses unauthorised callers, re-locks on exception, refuses nesting |
+| 4 | `tests/test_splits.py` | 38 tests, 34 needing no database |
+
+**Measured window sizes:** v1 fit 36,174 / calibrate 13,624 · v2 fit 49,798 / calibrate 13,801 ·
+promotion evaluation 25,352. No order appears in both a fit and a calibrate window, and no
+training row of either version reaches the evaluation window.
+
+**`VersionSplits` refuses to exist with overlapping windows**, so §18 A2's defect — v2 training
+on its own validation window — cannot be reintroduced by editing the config. The config would
+load and then immediately raise.
+
 ---
 
 ## Remaining work
@@ -449,8 +459,8 @@ skew the class exists to prevent, so it fails rather than serving one wrong pred
 | 0 | Skeleton and environment | 1.5 h | easy | ✅ **complete** · CI green |
 | 1 | Raw load into Postgres | 2.5 h | easy-med | ✅ **complete** · 33 tests |
 | 2 | Transform, validate, analytical table | 4 h | medium | ✅ **complete** · 80 tests |
-| 3 | As-of aggregates and feature assembly | 5 h | **hardest** | **parts A+B done** · C (`splits.py`) next |
-| 4 | Baselines and single models | 4 h | medium | full dependency install lands here · ⚠️ D22: a dominant `seller_late_rate_hist` is a leakage alarm |
+| 3 | As-of aggregates and feature assembly | 5 h | **hardest** | ✅ **complete** · all 3 parts |
+| 4 | Baselines and single models | 4 h | medium | **next** · full ~3 GB install · ⚠️ D22: a dominant `seller_late_rate_hist` is a leakage alarm |
 | 5 | Ensemble, calibration, threshold | 4 h | medium | ⚠️ base-rate shift (D20); fixes whether CatBoost must re-enter `requirements-api.txt` (D14) |
 | 6 | MLflow, pyfunc wrapper, registry | 4 h | medium | |
 | 7 | FastAPI and the parity test | 4 h | medium | ⚠️ read §18 A3, A6 first |

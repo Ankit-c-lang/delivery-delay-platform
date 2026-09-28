@@ -83,8 +83,11 @@ pydantic-settings pyyaml pandas pandera` (pandas 3.0.6, pandera 0.33.1 — note 
    It is a PROMOTION EVALUATION set, not an untouched generalization estimate (§18 A3).
 4. All preprocessing lives inside the MLflow pyfunc wrapper. The API layer contains none.
 5. Time-based CV only. `StratifiedKFold` / `KFold` are forbidden.
-6. Split dates come from `configs/splits.yaml`, which is keyed **per version**. Fitting and
-   calibration windows must be disjoint for every version (§18 A2).
+6. Split dates come from `configs/splits.yaml`, which is keyed **per version**, and
+   **`src/splits.py` is its only reader** — no other module may name a boundary. Fitting and
+   calibration windows must be disjoint for every version (§18 A2); `VersionSplits` refuses to
+   exist otherwise. The 2018-05 -> 08 window is **locked at runtime**: it raises unless
+   unlocked by `src.evaluation.score_holdout` or `src.registry.promote` (DECISIONS.md D25).
 7. Tests are written in the same phase as the code they cover.
 8. **Parity means: same raw record + same artifact -> same probability within 1e-6.**
    Snapshot selection is outside parity's scope; serving uses the latest bundled snapshot
@@ -141,15 +144,18 @@ splitting, Streamlit. If a change isn't in `PLAN.md`, ask before writing it.
 - Commit or push only when asked.
 
 ## Current phase
-**Phases 0-2 complete. Phase 3 parts A and B complete.** 162 tests pass, 84% coverage.
+**Phases 0-3 COMPLETE** — including the hardest phase. 204 tests pass, 86% coverage.
 `raw` holds 9 tables / 1,550,922 rows; `features.orders_analytical` holds 96,203 rows at a 6.79%
 `is_late` rate; six snapshot tables hold 34,427 rows; the **39-feature** matrix and a fitted
-`PreprocessingArtifact` build in ~4 s via `make features`.
+`PreprocessingArtifact` build in ~4 s via `make features`; `src/splits.py` owns every date
+boundary and locks the promotion evaluation window.
 
-**Next: Phase 3 part C — `src/splits.py`, reading `configs/splits.yaml`, with the
-`max(train.purchase) < min(val.purchase) < min(evaluation.purchase)` assertion. PLAN.md §13 says
-it is a separate prompt.** `src/features/build.py::fit_window` reads `splits.yaml` inline as a
-stand-in and should be deleted when `splits.py` lands.
+**Next: Phase 4 — Baselines and single models** (~4 h). Two things before starting:
+1. It installs the **full ~3 GB modelling stack**. `docker compose stop` the
+   `realtime-fraud-detection` stack first — 7.7 GB total RAM, and CatBoost on 10 threads is the
+   contention point (invariant 10).
+2. There is **no feature-matrix table**: call `build_matrix(version)` (D24). Labels come from
+   `features.order_outcomes`, aligned by `order_id`.
 
 Do not implement future phases. `PROGRESS.md` carries the detail. Two findings govern later
 phases: **D20** (base-rate shift, Phases 5 and 9) and **D22** (the history features are weak,

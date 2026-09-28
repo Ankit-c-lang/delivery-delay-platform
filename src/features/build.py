@@ -43,7 +43,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import yaml
 from sqlalchemy import text
 
 from src.db import get_engine
@@ -390,18 +389,6 @@ def load_inputs(conn) -> dict[str, object]:
     }
 
 
-def fit_window(version: str = "v1") -> tuple[pd.Timestamp, pd.Timestamp]:
-    """Read one version's fitting window from ``configs/splits.yaml``.
-
-    Read inline here only because ``src/splits.py`` is Phase 3 **part C**; when it lands it
-    owns this and this helper goes away. The dates still come from the single source of
-    truth, so there is no second copy of a boundary (§4.4).
-    """
-    splits = yaml.safe_load(Path("configs/splits.yaml").read_text(encoding="utf-8"))
-    window = splits["versions"][version]["fit"]
-    return pd.Timestamp(window["start"]), pd.Timestamp(window["end"])
-
-
 def build_matrix(version: str = "v1") -> dict[str, object]:
     """Fit the artifact on one version's training window and transform every order.
 
@@ -418,6 +405,7 @@ def build_matrix(version: str = "v1") -> dict[str, object]:
     """
     from src.features.artifact import PreprocessingArtifact
     from src.features.history import attach_history
+    from src.splits import assert_temporal_ordering, version_splits
 
     engine = get_engine()
     with engine.connect() as conn:
@@ -425,15 +413,15 @@ def build_matrix(version: str = "v1") -> dict[str, object]:
 
     orders = inputs["orders"]
     snapshots = inputs["snapshots"]
-    start, end = fit_window(version)
 
-    in_window = (orders["order_purchase_timestamp"] >= start) & (
-        orders["order_purchase_timestamp"] < end + pd.Timedelta(days=1)
-    )
-    train_orders = attach_history(orders.loc[in_window], snapshots)
-    logger.info(
-        "Fitting on %s: %s .. %s, %d rows", version, start.date(), end.date(), len(train_orders)
-    )
+    # src/splits.py is the only reader of configs/splits.yaml, so there is exactly one copy
+    # of every boundary. The ordering assertion runs here rather than only in a test: it is
+    # cheap, and a split that has drifted should stop the build rather than train a model.
+    splits = version_splits(version)
+    assert_temporal_ordering(orders, version)
+
+    train_orders = attach_history(splits.fit.select(orders), snapshots)
+    logger.info("Fitting on %s: %s, %d rows", version, splits.fit, len(train_orders))
 
     artifact = PreprocessingArtifact.fit(
         train_orders,

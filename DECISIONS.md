@@ -32,6 +32,7 @@ duplicated** — §18 is the authority, and two copies would drift apart.
 | [D22](#d22) | The as-of history features are weak, and that is the correct answer | 2026-09-28 |
 | [D23](#d23) | The §18 A6 asymmetry is two named methods, not an optional argument | 2026-09-28 |
 | [D24](#d24) | The feature matrix is not persisted as a table | 2026-09-28 |
+| [D25](#d25) | The promotion evaluation window is locked at runtime, not by convention | 2026-09-28 |
 
 ---
 
@@ -607,3 +608,43 @@ plausible numbers.
 **Consequence for Phase 4.** Call `build_matrix(version)` or
 `artifact.transform_with_snapshots(...)`; do not look for a matrix table. The labels come from
 `features.order_outcomes`, already aligned by `order_id`.
+
+## D25
+### The promotion evaluation window is locked at runtime, not by convention
+**Decision.** `src/splits.py` is the only module that reads `configs/splits.yaml`, and
+`promotion_evaluation_window()` raises `PromotionEvaluationLockedError` unless the caller has
+entered `unlock_promotion_evaluation(caller)` and named a module in `AUTHORISED_UNLOCKERS`
+(`src.evaluation.score_holdout` and `src.registry.promote`, nothing else).
+
+**Why a runtime guard and not a comment.** §4.4 suggests "a runtime guard that raises if it's
+loaded during training", and §18 A3 requires the window to have exactly one reader. A comment
+saying "do not use this" is obeyed until the afternoon someone is debugging a metric. The
+failure this prevents is silent: contaminating the evaluation set produces *better* numbers,
+so nothing looks wrong until the model reaches production and does not perform.
+
+**Design details that matter more than they look.**
+- **The guard protects the window definition, not just the loading code.** A stray
+  `orders[orders.purchase >= "2018-05-01"]` in a training notebook is the realistic mistake,
+  so the *dates* are what is locked.
+- **`promotion_evaluation_starts_on()` is readable without unlocking.** Knowing where the
+  window begins is not the same as reading its rows, and the §6.6 ordering assertion needs
+  the boundary. Without this split, that assertion would have to defeat the guard to do its
+  job, and a guard routinely defeated by its own codebase is decoration.
+- **It re-locks in a `finally`.** Otherwise one failed promotion run leaves the window open
+  for the rest of the process.
+- **Nesting is refused.** An unlock that can be layered has an extent that is hard to reason
+  about, and the entire value here is that the extent is one block in one module.
+- **The error message names `tests/fixtures/`.** A guard that blocks without saying what to do
+  instead gets worked around rather than obeyed.
+
+**Two inspection tests back it up**, which is §18 A3's "by import inspection" done now rather
+than deferred to Phase 9: no module in `src/` outside the authorised set mentions
+`promotion_evaluation_window`, and no module hardcodes a date inside the window. The second is
+parsed with `ast` so that prose in a docstring — including this module's own description of the
+mistake to avoid — is not mistaken for code. A line-based first version flagged exactly that and
+was wrong to.
+
+**Consequence.** `src/features/build.py::fit_window`, the inline stand-in that read
+`splits.yaml` during part B, is deleted. `build_matrix` now calls `version_splits` and runs
+`assert_temporal_ordering` on every build: it is cheap, and a split that has drifted should stop
+the build rather than quietly train a model.
