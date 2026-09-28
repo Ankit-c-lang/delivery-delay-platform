@@ -33,6 +33,8 @@ duplicated** — §18 is the authority, and two copies would drift apart.
 | [D23](#d23) | The §18 A6 asymmetry is two named methods, not an optional argument | 2026-09-28 |
 | [D24](#d24) | The feature matrix is not persisted as a table | 2026-09-28 |
 | [D25](#d25) | The promotion evaluation window is locked at runtime, not by convention | 2026-09-28 |
+| [D26](#d26) | Per-fold PR-AUC tracks the base rate, so lift is the comparable number | 2026-09-28 |
+| [D27](#d27) | Ship LightGBM as the lead model; `scale_pos_weight` made it worse | 2026-09-28 |
 
 ---
 
@@ -648,3 +650,70 @@ was wrong to.
 `splits.yaml` during part B, is deleted. `build_matrix` now calls `version_splits` and runs
 `assert_temporal_ordering` on every build: it is cheap, and a split that has drifted should stop
 the build rather than quietly train a model.
+
+## D26
+### Per-fold PR-AUC tracks the base rate, so lift is the fold-comparable number
+**Finding.** LightGBM's four time-series folds scored PR-AUC 0.0547, 0.1052, 0.1471, 0.3040 — a
+**5.5x spread** that looks like the model improving dramatically across the window. It is mostly
+not.
+
+| Fold | Validation window | Base rate | PR-AUC | Lift |
+|---|---|---:|---:|---:|
+| 1 | 2017-07-06 → 08-30 | 2.82% | 0.0547 | 1.94x |
+| 2 | 2017-08-30 → 10-19 | 4.17% | 0.1052 | 2.52x |
+| 3 | 2017-10-19 → 11-26 | 9.59% | 0.1471 | **1.53x** |
+| 4 | 2017-11-26 → 12-31 | 9.65% | 0.3040 | 3.15x |
+
+**Correlation between fold base rate and fold PR-AUC: +0.80.** PR-AUC is bounded below by the
+base rate, so a fold validating on a high-late-rate period scores higher for free. The base
+rate moves 3.4x across these folds — the same D20 non-stationarity, now showing up inside CV.
+
+**Two consequences that are easy to miss.**
+
+1. **The model is weakest exactly when it matters most.** Fold 3 covers November 2017, the Black
+   Friday spike §4.4 predicts. It has the highest base rate and the **lowest lift, 1.53x**.
+   Delivery performance degrades during the peak in ways these 39 features do not capture, so
+   the model is least useful in the period an operations team would most want it. That is a
+   finding to report in Phase 11, not to average away.
+2. **A mean over folds with unequal base rates is not a neutral average.** It is dominated by
+   the high-rate folds, so tuning on it prefers hyperparameters that do well *late* in the
+   window. For a model about to be deployed forward in time that is arguably the right bias —
+   but it is a choice, and it should be stated rather than inherited by accident.
+
+**Not changed.** The mean CV PR-AUC stays the selection metric: it is what §6.4 specifies, it is
+comparable *between models* on identical folds, and switching to mean lift would make this
+project's numbers incomparable to the plan's. Both are now reported side by side in
+`reports/phase4_models.md`.
+
+## D27
+### Ship LightGBM as the lead model; `scale_pos_weight` made it worse
+**Measured** on 36,174 v1 fit rows, `TimeSeriesSplit(4)`, base rate 5.85%:
+
+| Model | CV PR-AUC | Lift | Trials | Wall clock | Budget |
+|---|---:|---:|---:|---:|---:|
+| majority class | 0.0656 | 1.12x | — | — | — |
+| logistic regression | 0.1357 | 2.32x | — | — | — |
+| **LightGBM** | **0.1528** | **2.61x** | 40/40 | **105 s** | 900 s |
+| CatBoost | 0.1489 | 2.55x | 20/20 | 373 s | 1500 s |
+| XGBoost | 0.1468 | 2.51x | 40/40 | 107 s | 900 s |
+
+**All three beat both baselines**, which is Phase 4's completion criterion, and **no study timed
+out** — the whole run took ~10 minutes against a 55-minute worst case, so the §6.4 budget was
+conservative for this dataset size. CatBoost is 3.5x slower than LightGBM for a slightly worse
+score, exactly as §6.4 warned.
+
+**The margins are modest and that is consistent.** The best GBDT beats logistic regression by
++0.017 PR-AUC, a 12.6% relative gain. Three GBDTs land within 0.006 of each other. Both facts
+follow from D22: the history features are weak, so there is limited non-linear structure for a
+tree to find beyond what a linear model already gets from `promised_days`.
+
+**`scale_pos_weight` tested, not assumed (§6.4).** At the ratio the data implies, 16.1, LightGBM
+scored **0.1456 against 0.1528 unweighted — worse by 0.0071**. §6.4 predicted exactly this:
+reweighting the loss moves the probabilities without improving the ranking, and PR-AUC measures
+the ranking. No resampling is used anywhere. Train on raw probabilities, calibrate in Phase 5,
+then tune the threshold.
+
+**How to apply in Phase 5.** LightGBM leads, but the three are close enough that §6.5's warning
+applies in advance: a blend of three highly correlated models may gain very little for 3x
+inference cost. Measure the delta and be prepared to ship the single model with the ensemble
+kept as a logged experiment — §6.5 says that decision, stated plainly, is the stronger answer.

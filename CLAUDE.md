@@ -54,20 +54,21 @@ module does not exist yet is not written (DECISIONS.md D15).
   `up` waits for both services to report `healthy`. `down` keeps volumes on purpose.
 - `make check-data | load-raw | build-orders` and `make etl` for all three in order
 - `make snapshots` (as-of snapshots) · `make features` (fit the artifact, build the matrix)
+- `make baselines` (fast, no Optuna) · `make tune` (baselines + all 3 GBDTs, ~10 min measured)
 
 **Arrive with their phase:**
-- `make train V=v1` (4) · `register` (6) · `promote` (9)
-- `make serve | bench` (7-8)
+- `register` (6) · `promote` (9) · `make serve | bench` (7-8)
 - `make bootstrap` (8) — the ordered first-run sequence (PLAN §18 A5). **Required before
   `docker compose up` on a clean machine**, because the API resolves `@champion` at startup
   and the registry starts empty.
 
 All Python entry points run through `.venv/bin/python -m src.x`.
 
-Installed so far: `requirements-dev.txt` plus `sqlalchemy psycopg2-binary pydantic
-pydantic-settings pyyaml pandas pandera` (pandas 3.0.6, pandera 0.33.1 — note the import is
-`pandera.pandas`, not top-level `pandera`). The modelling stack installs in Phase 4;
-`requirements-api.txt` is unproven until Phase 8. MLflow is reached over HTTP at
+**The full `requirements.txt` is installed** (1.9 GB venv): pandas 3.0.6, numpy 2.5.3,
+scikit-learn 1.9.1, LightGBM 4.7.0, XGBoost 3.4.1, CatBoost 1.2.10, Optuna 5.0.0, SHAP 0.52.0,
+MLflow 3.16.1, pandera 0.33.1. Two API notes that cost time if forgotten: pandera's import is
+`pandera.pandas`, not top-level, and LightGBM 4.7 deprecates `eval_set` in favour of
+`eval_X`/`eval_y`. `requirements-api.txt` is still unproven until Phase 8. MLflow is reached over HTTP at
 `$MLFLOW_TRACKING_URI`, never by opening `mlflow/mlflow.db` directly (D12).
 
 ## Invariants (never break these)
@@ -144,18 +145,25 @@ splitting, Streamlit. If a change isn't in `PLAN.md`, ask before writing it.
 - Commit or push only when asked.
 
 ## Current phase
-**Phases 0-3 COMPLETE** — including the hardest phase. 204 tests pass, 86% coverage.
+**Phases 0-4 COMPLETE.** 267 tests pass. LightGBM leads at CV PR-AUC **0.1528** (2.61x the
+base rate), beating logistic regression 0.1357 and the majority-class floor 0.0656.
 `raw` holds 9 tables / 1,550,922 rows; `features.orders_analytical` holds 96,203 rows at a 6.79%
 `is_late` rate; six snapshot tables hold 34,427 rows; the **39-feature** matrix and a fitted
 `PreprocessingArtifact` build in ~4 s via `make features`; `src/splits.py` owns every date
 boundary and locks the promotion evaluation window.
 
-**Next: Phase 4 — Baselines and single models** (~4 h). Two things before starting:
-1. It installs the **full ~3 GB modelling stack**. `docker compose stop` the
-   `realtime-fraud-detection` stack first — 7.7 GB total RAM, and CatBoost on 10 threads is the
-   contention point (invariant 10).
-2. There is **no feature-matrix table**: call `build_matrix(version)` (D24). Labels come from
-   `features.order_outcomes`, aligned by `order_id`.
+**Next: Phase 5 — Ensemble, calibration, threshold** (~4 h). Three findings govern it:
+- **D27:** the three GBDTs land within 0.006 PR-AUC of each other, so §6.5's warning applies in
+  advance — measure the blend delta and be ready to ship the single model with the ensemble kept
+  as a logged experiment.
+- **D20:** both calibration windows sit at 2.2-2.7x the evaluation window's base rate, so
+  isotonic calibration will over-predict there. That is a base-rate shift, not a bug.
+- **D26:** the model is **weakest during the November demand spike** (lowest lift of any fold).
+  Report that rather than averaging it away.
+
+The `realtime-fraud-detection` stack is currently **stopped** to free RAM for tuning. Restart it
+with `docker start realtime-fraud-detection-redis-1 realtime-fraud-detection-scorer-1
+realtime-fraud-detection-graph-refresh-1` when this project is not training.
 
 Do not implement future phases. `PROGRESS.md` carries the detail. Two findings govern later
 phases: **D20** (base-rate shift, Phases 5 and 9) and **D22** (the history features are weak,

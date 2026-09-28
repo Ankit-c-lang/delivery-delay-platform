@@ -9,7 +9,7 @@ COMPOSE := docker compose -f docker-compose.yml
 
 .DEFAULT_GOAL := help
 .PHONY: help lint format test test-unit up down stop ps logs psql health check-data load-raw \
-        build-orders etl snapshots features
+        build-orders etl snapshots features baselines tune
 
 help: ## List available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -73,3 +73,11 @@ snapshots: ## Build the as-of monthly aggregate snapshots (PLAN.md 4.5, 18 A1)
 
 features: snapshots ## Fit the preprocessing artifact and build the 39-feature matrix
 	$(PY) -m src.features.build
+
+# --- Phase 4 -------------------------------------------------------------------
+
+baselines: ## Baselines only, no tuning (fast: no Optuna)
+	$(PY) -m src.training.tune --models
+
+tune: ## Baselines + Optuna for all 3 GBDTs. Budget is 55 min worst case (PLAN.md 6.4).
+	$(PY) -m src.training.tune

@@ -54,6 +54,7 @@ reports/*
 !reports/etl_funnel.md
 !reports/as_of_snapshots.md
 !reports/feature_matrix.md
+!reports/phase4_models.md
 *.png
 !docs/**/*.png
 

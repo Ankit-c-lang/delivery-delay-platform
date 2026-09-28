@@ -5,111 +5,87 @@ that task. Source of truth for *what* to build is `PLAN.md`; this file only trac
 are*. Decisions and their reasons live in `DECISIONS.md`.
 
 - **Plan version:** v1 (2026-09-28) + amendments §18 · **Pre-flight completed:** 2026-09-28
-- **Current phase:** Phase 3 — As-of aggregates and feature assembly · **✅ COMPLETE**
-  (all three parts). This was the plan's hardest phase.
-- **Overall:** **4 / 12 phases** · 204 tests green, 86% coverage
-- **Estimated remaining:** ~28 h of build work (PLAN §3 budget: 36-42 h)
+- **Current phase:** Phase 4 — Baselines and single models · **✅ COMPLETE**
+- **Overall:** **5 / 12 phases** · 267 tests green
+- **Estimated remaining:** ~24 h of build work (PLAN §3 budget: 36-42 h)
 
 ---
 
 ## Currently working on
 
-**Nothing in flight. Phase 3 is complete — all three parts.**
+**Nothing in flight. Phase 4 is complete.**
 
-Part C added `src/splits.py`: the only reader of `configs/splits.yaml`, so no boundary is
-written twice anywhere in the project. 38 new tests (204 total, 86% coverage; `splits.py` at
-95%).
+All three GBDTs beat both baselines, which is the phase's completion criterion, and **no study
+timed out** — the whole run took **~10 minutes against a 55-minute worst case**, so §6.4's
+budget was conservative for this dataset size.
 
-**The promotion evaluation window is locked at runtime**, which is what §4.4 asks for.
-`promotion_evaluation_window()` raises unless the caller entered
-`unlock_promotion_evaluation()` and named itself as `src.evaluation.score_holdout` or
-`src.registry.promote`. The guard protects the **dates**, not just the loading code, because
-the realistic mistake is a stray `orders[orders.purchase >= "2018-05-01"]` in a training
-notebook. It re-locks in a `finally`, refuses nesting, and its error message names
-`tests/fixtures/` — a guard that blocks without saying what to do instead gets worked around.
-`promotion_evaluation_starts_on()` is readable **without** unlocking, so the §6.6 ordering
-assertion never has to defeat the guard to do its job. See `DECISIONS.md` D25.
+| Model | CV PR-AUC | Lift | Trials | Wall clock | Budget |
+|---|---:|---:|---:|---:|---:|
+| _majority class_ | 0.0656 | 1.12x | — | — | — |
+| _logistic regression_ | 0.1357 | 2.32x | — | — | — |
+| **LightGBM** | **0.1528** | **2.61x** | 40/40 | **105 s** | 900 s |
+| CatBoost | 0.1489 | 2.55x | 20/20 | 373 s | 1500 s |
+| XGBoost | 0.1468 | 2.51x | 40/40 | 107 s | 900 s |
 
-**§18 A3's "by import inspection" is done now, not deferred to Phase 9.** Two tests: no module
-in `src/` outside the authorised set mentions `promotion_evaluation_window`, and no module
-hardcodes a date inside the window.
+CatBoost is **3.5x slower than LightGBM for a slightly worse score**, exactly as §6.4 warned.
 
-**The §6.6 ordering line now runs on every build**, not only in tests:
+**The margins are modest, and that is consistent with D22.** The best GBDT beats logistic
+regression by +0.017 PR-AUC — a 12.6% relative gain — and the three GBDTs land within 0.006 of
+each other. Both follow from the history features being weak: there is limited non-linear
+structure to find beyond what a linear model already extracts from `promised_days`.
 
-| Version | max fit purchase | min calibrate | max calibrate | evaluation starts |
-|---|---|---|---|---|
-| v1 | 2017-12-31 23:29:31 | 2018-01-01 02:48:41 | 2018-02-28 23:57:55 | 2018-05-01 |
-| v2 | 2018-02-28 23:57:55 | 2018-03-01 00:00:00 | 2018-04-30 23:47:26 | 2018-05-01 |
+**`scale_pos_weight` tested, not assumed (§6.4).** At the implied ratio of 16.1, LightGBM scored
+**0.1456 against 0.1528 unweighted — worse by 0.0071**. §6.4 predicted precisely that:
+reweighting moves the probabilities without improving the ranking, and PR-AUC measures the
+ranking. No resampling anywhere.
 
-v2's boundary is tight — 2 minutes — and holds strictly. `build_matrix` asserts it before
-fitting, because a drifted split should stop the build rather than quietly train a model.
+### The finding that needed digging for: per-fold PR-AUC mostly tracks the base rate
 
-**Cleanup done:** `src/features/build.py::fit_window`, the inline stand-in from part B, is
-deleted.
+LightGBM's folds scored 0.055, 0.105, 0.147, **0.304** — a 5.5x spread that looks like the model
+improving dramatically. It is mostly not:
 
-### One of my own tests was wrong and got rewritten
+| Fold | Validation window | Base rate | PR-AUC | Lift |
+|---|---|---:|---:|---:|
+| 1 | 2017-07-06 → 08-30 | 2.82% | 0.0547 | 1.94x |
+| 2 | 2017-08-30 → 10-19 | 4.17% | 0.1052 | 2.52x |
+| 3 | 2017-10-19 → 11-26 | 9.59% | 0.1471 | **1.53x** |
+| 4 | 2017-11-26 → 12-31 | 9.65% | 0.3040 | 3.15x |
 
-The "no hardcoded evaluation date" test scanned line by line and flagged `src/splits.py`'s own
-docstring — the sentence describing the mistake to avoid. Rewritten with `ast` so it inspects
-**code string literals** and skips docstrings. A test that cannot tell prose from code would
-have trained people to ignore it.
+**Correlation between fold base rate and fold PR-AUC: +0.80.** PR-AUC is bounded below by the
+base rate, so a high-late-rate fold scores higher for free — the same D20 non-stationarity, now
+inside CV.
 
----
+Two consequences:
+1. **The model is weakest exactly when it matters most.** Fold 3 is November 2017, the Black
+   Friday spike, with the highest base rate and the **lowest lift (1.53x)**. Delivery performance
+   degrades during the peak in ways these 39 features do not capture, so the model is least
+   useful in the period operations would most want it.
+2. **A mean over unequal-base-rate folds is not a neutral average** — it is dominated by the
+   high-rate folds, so tuning prefers hyperparameters that work *late* in the window. Arguably
+   the right bias for forward deployment, but a choice rather than an accident.
 
-### The headline finding: the history features are weak, and that is correct
+Both numbers are now in `reports/phase4_models.md`. See `DECISIONS.md` D26 and D27.
 
-§4.5 calls these "the most predictive features available". Measured on 88,951 training rows they
-are not — and the comparison against the leaky rule is the point:
+### Three defects found and fixed while building
 
-| Feature | corr (A1 rule) | corr (leaky rule) | inflation |
-|---|---:|---:|---:|
-| `route_late_rate_hist` | **+0.0785** | +0.1037 | 1.3x |
-| `seller_late_rate_hist` | **+0.0197** | +0.0398 | **2.0x** |
-| `category_late_rate_hist` | −0.0062 | +0.0070 | sign flip |
+- **A `FutureWarning` I introduced.** `LogisticRegression(n_jobs=1)` has had no effect on lbfgs
+  since scikit-learn 1.8 and is removed in 1.10. Dropped.
+- **LightGBM 4.7 deprecates `eval_set`** in favour of `eval_X`/`eval_y`. Checked the actual
+  signature rather than guessing, and switched. The smoke tests now pass with
+  `-W error::FutureWarning`.
+- **Ruff rejected `X` as an argument name** (N803). Rather than rename to something worse, the
+  exception is scoped to `src/training/*`, `src/evaluation/*` and `tests/*` with the reason
+  written in `pyproject.toml`: `X, y` is the convention every ML reader expects.
 
-I rebuilt the identical snapshots with the filter column swapped to `order_purchase_timestamp`
-to get the middle column. **Half the apparent signal in the headline history feature was the
-future leaking in.** That is the measured cost of A1, and the strongest evidence it was a real
-defect rather than a pedantic one.
+### A note on the install
 
-Ruled out as explanations: a **time confound** (within-month correlations are essentially
-unchanged, and month explains only 3.6% of the variance in `is_late`) and a **bug** (all 26,730
-seller-month snapshots were recomputed in SQL, set-based, and compared with a FULL OUTER JOIN —
-zero mismatches on `order_count`, `late_rate` and `avg_delivery_days`).
+`requirements.txt` took ~17 minutes, which looked like a hang. It was not: downloads had
+finished and pip was unpacking — the venv grew 923 MB → 1342 MB in 20 seconds while the network
+sat at 11 KB/s. Worth knowing before killing it next time. Final venv is **1.9 GB**; 42 GB free.
 
-Honest reading: on Olist, *when* and *where* an order ships predicts lateness far better than
-*who* ships it. See `DECISIONS.md` D22, which also sets the Phase 4 expectation — **if
-`seller_late_rate_hist` dominates the model, that is a leakage alarm, not a win.**
-
-### Two problems found and fixed while doing it
-
-**1. `avg_handling_days` needed a column Phase 2 had dropped.** §5 F6 asks for
-`seller_avg_handling_days_hist`, which needs `order_delivered_carrier_date` — denylisted, and
-dropped. Same collision as D19, unanticipated. `features.order_outcomes` now also carries
-`order_delivered_carrier_date`, `delivery_days` and `handling_days`. **Using a post-purchase
-column of a *resolved historical* order is not a §4.2 violation** — the denylist governs the
-order being predicted, and `is_late` is derived the same way. The Phase 2 test asserting that
-table's exact column set failed on the change, which is precisely its job.
-
-Data quality handled there: 165 orders record a carrier handoff **before their own purchase**
-(down to −171 days) and 19 record it after customer delivery. `handling_days` is NULL for those
-184 plus the 1 with no carrier date — excluded, not clipped, because a negative handling time is
-a recording error rather than a fast handoff.
-
-**2. One of my own tests was unusable.** The SQL cross-check was written as a correlated
-subquery per snapshot row and ran for **over nine minutes** on 26,730 rows before I cancelled
-it. Rewritten set-based it takes **under 3 seconds**, and it is now *stronger*: a FULL OUTER
-JOIN catches wrong metrics, extra rows and missing rows, where the correlated version only
-checked rows that existed. A suite that slow would have made the remaining nine phases painful.
-
-Two smaller test defects fixed in passing: an ambiguous `is_late` reference (both
-`orders_analytical` and `order_outcomes` carry it) and a guessed threshold — `differing >
-10_000` against an actual 9,245. Replaced with the measured values, 9,245 snapshot rows and
-36,549 leaked order-contributions, pinned exactly.
-
-A third was caught before it did damage: the `write_snapshots` round-trip test DROPs and
-recreates the real snapshot tables, so it runs inside a transaction that always rolls back, and
-asserts afterwards that the real table still holds its 26,730 rows.
+**The `realtime-fraud-detection` stack is currently stopped** to free RAM. Restart with
+`docker start realtime-fraud-detection-redis-1 realtime-fraud-detection-scorer-1
+realtime-fraud-detection-graph-refresh-1`. Its image and volume are untouched.
 
 ---
 
@@ -230,34 +206,35 @@ filter and §4.5's snapshot rule:
 
 ## Next up (in order)
 
-**Phase 4 — Baselines and single models** (PLAN §13 Phase 4, ~4 h, medium). Read `PLAN.md`
-§6.3, §6.4 and §13 Phase 4 first.
+**Phase 5 — Ensemble, calibration, threshold** (PLAN §13 Phase 5, ~4 h, medium). Read §6.5 and
+§4.7 first.
 
-**Two things to do before writing any code:**
-1. **`docker compose stop` the `realtime-fraud-detection` stack.** Phase 4 installs the full
-   ~3 GB modelling stack and tunes CatBoost on 10 threads in 7.7 GB of total RAM. This is the
-   contention point `CLAUDE.md` invariant 10 warns about, and the one phase where it matters.
-2. `make up && make etl && make features` if the Postgres volume is fresh (~29 s end to end).
+**Three findings govern this phase, and all three say "report honestly rather than manufacture a
+win":**
 
-**Carry into Phase 4:**
-- **D22 is the headline.** Expect `promised_days` to dominate and F6/F7/F8 to contribute little.
-  **A dominant `seller_late_rate_hist` is a leakage alarm, not a win** — with the correct §18 A1
-  rule it correlates at only +0.02 with the target.
-- `category_late_rate_hist` at −0.006 is the first candidate for §5's "drop 1-3 dead features".
-  Decide on permutation importance, not correlation alone, and report the surviving count
-  honestly.
-- **There is no feature-matrix table.** Call `build_matrix(version)` (D24); labels come from
-  `features.order_outcomes`, aligned by `order_id`.
-- `TimeSeriesSplit(n_splits=4)` only. `KFold` and `StratifiedKFold` are forbidden (invariant 5),
-  and early stopping uses each fold's own validation slice, not the calibration window (§6.3).
-- Use native categorical handling, not one-hot: the matrix already carries `category` dtype on
-  all six categorical features (§6.1).
-- Report the trivial baseline explicitly — predict never-late gives ~93% accuracy and 0% recall.
-  It is the cleanest way to show why accuracy is the wrong metric here (§4.6).
-- **Lead with PR-AUC.** With ~7% positives, ROC-AUC flatters.
+1. **D27 — the blend may not pay.** The three GBDTs are within **0.006 PR-AUC** of each other, so
+   §6.5's expectation of +0.002 to +0.01 is exactly the range to expect. Measure the delta, and
+   be ready to **ship the single model** with the ensemble kept as a logged experiment. §6.5 is
+   explicit that stating that decision plainly is the stronger answer.
+2. **D20 — calibration will look broken and will not be.** Both calibration windows sit at
+   9.75% and 11.84% against the evaluation window's 4.40%. Isotonic calibration fitted at a
+   ~10-12% prior **will over-predict** on a 4.4% set, and a threshold swept on the calibration
+   window will be too low there. Report calibration on both windows and name the cause.
+3. **D26 — the model is weakest during the November spike** (lift 1.53x against 3.15x in the
+   adjacent fold). The cost-based threshold in §4.7 is swept on a window whose base rate is not
+   the deployment base rate; say so.
 
-**Expect a fourth Phase 2 extension.** Each new §5 family so far has needed an order-level
-aggregate that lives in `orders_analytical`; the feature audit may want one more.
+**Practical notes:**
+- Blend weights, calibration and threshold are fitted on the **calibrate** window, which is
+  `version_splits(v)` — never the fit window and never the evaluation window.
+- Phase 5 attaches its calibrator and threshold via `artifact.with_decision(...)`, which returns
+  a **new** artifact (D23).
+- §4.7 wants the review-score damage analysis too: reviews are in `raw.order_reviews`, for
+  business impact only, **never as features** (§4.2).
+- Frame the cost ratio as an assumption, never as measured.
+
+**Start of session:** `make up`, then `make etl && make features` if the Postgres volume is fresh
+(~29 s), then `make tune` (~10 min) if you need the tuned parameters.
 
 ---
 
@@ -450,6 +427,31 @@ training row of either version reaches the evaluation window.
 on its own validation window — cannot be reintroduced by editing the config. The config would
 load and then immediately raise.
 
+### Phase 4 — Baselines and single models — ✅ COMPLETE (2026-09-28)
+
+| # | Item | Verified by |
+|---|---|---|
+| 1 | `src/evaluation/metrics.py` — PR-AUC, ROC-AUC, Brier, recall/precision@capacity, lift | 33 tests, every expected value **derived by hand in a comment**, not copied from a run |
+| 2 | `src/training/baselines.py` — majority class + logistic regression | majority scores the base rate and ROC-AUC exactly 0.5; logistic 0.1357 |
+| 3 | `src/training/tune.py` — Optuna over `TimeSeriesSplit(4)`, spaces from `configs/models.yaml` | 40/40, 40/40, 20/20 trials, no timeouts |
+| 4 | `tests/test_training_cv.py` | 13 tests; every fold's max train date < min validation date |
+| 5 | `tests/fixtures/generate_synthetic.py` + smoke tests | 17 tests, LightGBM smoke train in **3.9 s** against a 30 s requirement |
+| 6 | `configs/models.yaml`, `make baselines`, `make tune` | run repeatedly |
+
+**The CV guard is the part worth re-reading.** `TimeSeriesSplit` splits by *position*, not by
+timestamp — it has no idea what the dates are. Hand it unsorted rows and it produces folds that
+look perfectly ordered, leak badly, and raise nothing. So `assert_time_sorted` is called before
+every study, and one test *demonstrates* the failure: on shuffled rows the splitter still reports
+ordered index ranges while the dates inside them interleave.
+
+**Two inspection tests enforce §6.6 by parsing the source with `ast`:** no module in `src/`
+imports `KFold`, `StratifiedKFold`, `ShuffleSplit` or `StratifiedShuffleSplit`, and none uses
+`train_test_split` — which shuffles by default and is the same mistake wearing a different name.
+
+**The synthetic fixture imports its schema from `src/features/build.py`** rather than restating
+it, so it cannot drift from the real 39-column contract. It is what CI will run from Phase 10,
+since the real dataset is 121 MB and CC BY-NC-SA and will never be in a workflow.
+
 ---
 
 ## Remaining work
@@ -460,8 +462,8 @@ load and then immediately raise.
 | 1 | Raw load into Postgres | 2.5 h | easy-med | ✅ **complete** · 33 tests |
 | 2 | Transform, validate, analytical table | 4 h | medium | ✅ **complete** · 80 tests |
 | 3 | As-of aggregates and feature assembly | 5 h | **hardest** | ✅ **complete** · all 3 parts |
-| 4 | Baselines and single models | 4 h | medium | **next** · full ~3 GB install · ⚠️ D22: a dominant `seller_late_rate_hist` is a leakage alarm |
-| 5 | Ensemble, calibration, threshold | 4 h | medium | ⚠️ base-rate shift (D20); fixes whether CatBoost must re-enter `requirements-api.txt` (D14) |
+| 4 | Baselines and single models | 4 h | medium | ✅ **complete** · LightGBM leads at 0.1528 |
+| 5 | Ensemble, calibration, threshold | 4 h | medium | **next** · ⚠️ D20 base-rate shift, D26 fold lift, D27 blend may not pay · fixes whether CatBoost must re-enter `requirements-api.txt` (D14) |
 | 6 | MLflow, pyfunc wrapper, registry | 4 h | medium | |
 | 7 | FastAPI and the parity test | 4 h | medium | ⚠️ read §18 A3, A6 first |
 | 8 | Docker and Compose | 3 h | medium | ⚠️ read §18 A5 first · validate `mlflow-skinny` **and** the 305 MB CUDA dependency (D14) |

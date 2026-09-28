@@ -31,7 +31,12 @@ select = [
 
 [tool.ruff.lint.per-file-ignores]
 # Assertions and reused fixtures are the point of a test file.
-"tests/*" = ["S101"]
+"tests/*" = ["S101", "N803", "N806"]
+# N803/N806: `X` for a feature matrix and `y` for labels is the sklearn convention every ML
+# reader expects. Renaming them to satisfy pep8-naming would make this code read worse, not
+# better, so the exception is scoped to the modelling packages rather than applied globally.
+"src/training/*" = ["N803", "N806"]
+"src/evaluation/*" = ["N803", "N806"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["src", "api"]
