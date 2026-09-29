@@ -30,6 +30,15 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH=/app
 
+# libgomp1: the OpenMP runtime. LightGBM links against it and `python:3.12-slim` does not ship it,
+# so the first LightGBM image started and then failed at model load with
+# `OSError: libgomp.so.1: cannot open shared object file`. CatBoost did not need it, which is the
+# point worth remembering: changing the shipped model changed this image's SYSTEM dependencies, not
+# only its Python ones (DECISIONS.md D41). --no-install-recommends keeps it to ~150 KB.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libgomp1 \
+ && rm -rf /var/lib/apt/lists/*
+
 COPY --from=builder /install /usr/local
 
 # 1000:1000 matches the host user, so a bind mount added later needs no ownership fixing.

@@ -6,7 +6,7 @@ are*. Decisions and their reasons live in `DECISIONS.md`.
 
 - **Plan version:** v1 (2026-09-28) + amendments §18 · **Pre-flight completed:** 2026-09-28
 - **Current phase:** Phase 8 — Docker and Compose · **✅ COMPLETE**
-- **Overall:** **9 / 12 phases** · 400 tests green, zero skips · Phase 6's output rebuilt after two real bugs (D33, D35)
+- **Overall:** **9 / 12 phases** · 411 tests green, zero skips · Phase 6's output rebuilt after two real bugs (D33, D35)
 - **Estimated remaining:** ~20 h of build work (PLAN §3 budget: 36-42 h)
 
 ---
@@ -169,13 +169,55 @@ port, and the cause was measured rather than guessed: same `os.cpu_count()`, sam
 container removes 25 of those 33 ms, placing the cost in **Docker's port-forwarding path for a
 ~60 KB body** — about 0.25 ms per record of plumbing. Not a model or runtime regression.
 
-#### Still open, for the user's decision
+#### D41 — the equivalence band, added on request after the image was measured
 
-CatBoost is **269 MB** of the image; LightGBM is **10 MB**. Their PR-AUC differs by less than the
-0.004 band D35 established, and LightGBM is *higher* on cross-validation (0.15349 against 0.15209).
-Shipping LightGBM would cut ~259 MB for no measurable loss, and "indistinguishable on PR-AUC, chose
-the 10 MB one" is a better answer than a fourth decimal place. Not changed — it would mean re-running
-`decide` and `train`.
+The CatBoost-vs-LightGBM question was settled by **a rule, not a swap**. `select_single_model` takes
+the highest PR-AUC, then among models within `decision.selection_band_pr_auc` of it ships the one
+with the lowest `decision.serving_cost_mb`.
+
+The band is **0.005** and is not an arbitrary tolerance: it is the amount **thread count alone** moved
+CatBoost's score in D35, on identical data with identical hyperparameters. That is this pipeline's
+measured reproducibility floor, so a narrower gap is the environment rather than a result. The
+observed gap was **0.00020 — 25× narrower than the floor.**
+
+```
+ship lightgbm (0.21585) over catboost (0.21604): the 0.00020 gap is inside the
+0.005 equivalence band, and lightgbm costs 10 MB against 269 MB
+```
+
+**Why a rule.** `configs/base.yaml` already argues, about `min_ensemble_gain_pr_auc`, that a decision
+should be "a threshold, not a mood". Hand-picking LightGBM would have made the shipped model
+unexplainable from the code — a worse defect than 259 MB.
+
+**Guard rails, each tested.** A gap wider than the band is decisive at any price, so the rule never
+trades accuracy for size. A band of `0.0` disables it from config. An unpriced library raises rather
+than winning every tie by appearing weightless. Ordering is deterministic whatever order the scores
+arrive in. A test pins the band to D35's measured spread, so widening it needs a new measurement
+rather than a new preference.
+
+The tests also caught a fragility in the implementation: `0.2200 - 0.2150` is `0.005000000000000004`
+in float64, so a model sitting **exactly** on the documented boundary was excluded by representation
+error. A rule about ignoring differences too small to reproduce should not itself turn on one, hence
+a `BAND_EPSILON` of 1e-12.
+
+**It immediately exposed a duplicated decision — the third bug of that shape.** `train.py` re-derived
+the choice inline as `"blend" if blend.ship_ensemble else blend.best_single`, so the moment
+`build_decision` gained the band the two disagreed and **v3 was registered as CatBoost** while
+`make decide` had chosen LightGBM. With D33 (validated but unenforced config) and D38 (a dependency
+list written from appearances), that is now **invariant 17: one decision, one implementation.**
+
+**Result.** `@champion` is **v4** (lightgbm, threshold 0.17742). v2 is `superseded` — correct under
+the old rule, so not withdrawn as broken. v3 is `withdrawn`. Image **1.62 GB → 1.03 GB**, a 590 MB
+cut, larger than CatBoost's own 269 MB wheel because dropping it also drops what it pulled in.
+Latency is **unchanged**: single p50 56.65 ms against 53.41, batch-100 80.45 against 88.21 — moving
+in opposite directions, so noise. The model was never the cost.
+
+**And swapping the model changed the image's SYSTEM dependencies.** The first LightGBM image built,
+started, then failed at load with `OSError: libgomp.so.1: cannot open shared object file`. LightGBM
+links against the OpenMP runtime, `python:3.12-slim` does not ship it, and CatBoost had bundled its
+own — so nothing in `requirements-api.txt` could have predicted it. `libgomp1` is now installed in
+the runtime stage. The lesson for Phase 9: a promotion that changes the shipped library may need an
+**apt** package, so "rebuild the image" can mean "edit the Dockerfile".
 
 ### Phase 7 — the API, and what it is measured at### Phase 7 — the API, and what it is measured at
 
@@ -720,7 +762,7 @@ since the real dataset is 121 MB and CC BY-NC-SA and will never be in a workflow
 | 5 | Ensemble, calibration, threshold | 4 h | medium | ✅ **complete** · ship XGBoost (D31) · D29 resolved |
 | 6 | MLflow, pyfunc wrapper, registry | 4 h | medium | ✅ **complete** · v1 `@champion`, loads in a fresh process |
 | 7 | FastAPI and the parity test | 4 h | medium | ✅ **done** · parity green at 1e-6 · single p50 52.6 ms |
-| 8 | Docker and Compose | 3 h | medium | ✅ **done** · 1.62 GB image, 65 packages · cold cycle verified |
+| 8 | Docker and Compose | 3 h | medium | ✅ **done** · **1.03 GB** image, 65 packages · cold cycle verified · D41 band ships lightgbm |
 | 9 | Retraining lifecycle and promotion gate | 3.5 h | medium | **next** · ⚠️ read §18 A2, A3 · gate compares **v2 vs v3** (v1 withdrawn) · Brier tolerance against D20 |
 | 10 | Full CI/CD | 3 h | medium | CI gains pytest + Postgres service container |
 | 11 | Documentation and interview prep | 2.5 h | easy | |

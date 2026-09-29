@@ -7,8 +7,10 @@ Postgres feature warehouse -> leakage-safe as-of aggregates -> LightGBM/XGBoost/
 -> MLflow tracking + registry -> promotion gate -> containerized FastAPI.
 
 The full plan is `PLAN.md`; prompts reference its section numbers.
-**`PLAN.md` §18 holds seven binding amendments from a design review. Where §18 and the body
-of the plan disagree, §18 wins.** Read §18 before writing code in Phases 3, 7, 8 or 9.
+**`PLAN.md` §18 holds eight binding amendments. Where §18 and the body of the plan disagree,
+§18 wins.** A1-A7 came from the pre-build design review; **A8 was added during Phase 8** and changes
+model selection, so the body of §6.5 is now out of date on its own. Read §18 before writing code in
+Phases 3, 7, 8 or 9.
 
 Current status and next task live in `PROGRESS.md`. Decisions live in `DECISIONS.md`.
 
@@ -135,6 +137,11 @@ MLflow 3.16.1, pandera 0.33.1. Two API notes that cost time if forgotten: pander
 16. **The bundled serving snapshot is bounded by the version's `aggregates_through`**, not by
     "the newest month in the database" (D33). v1 bundles 2018-03-01. `PreprocessingArtifact.fit`
     requires the bound as an argument, so it cannot be forgotten.
+17. **One decision, one implementation.** Three bugs have now had the same shape: a config value
+    validated but enforced by nothing (D33), a dependency list written from what the code looked
+    like it needed (D38), and the shipping choice re-derived inline in `train.py` while
+    `build_decision` applied the equivalence band (D41) — which registered a CatBoost model while
+    `make decide` had chosen LightGBM. If a rule exists, call it; never restate it.
 
 ## Out of scope (do not add)
 Airflow, Prefect, Dagster, Kafka, Kubernetes, Terraform, Spark, a feature store, a vector
@@ -224,8 +231,14 @@ the levels this model was trained on" rather than "never seen".
 **Phase 8 COMPLETE.** `docker compose down && docker compose up -d` gives a healthy three-service
 stack and a working prediction; `delay-api` runs as **uid 1000**, resolves `@champion` through
 `http://mlflow:5000`, and the container's prediction is **bitwise identical** to the venv's.
-Image **1.62 GB** from a **65-package** serving subset (the full stack is 110 packages / 1.9 GB of
+Image **1.03 GB** from a 65-package serving subset (the full stack is 110 packages / 1.9 GB of
 site-packages).
+
+**LightGBM ships, not CatBoost** (D41). Model selection now has an **equivalence band** of
+**0.005** — D35's measured reproducibility floor — and breaks ties inside it on serving cost. The
+observed gap was **0.00020**, 25× narrower than the floor, and the swap cut the image from 1.62 GB to
+**1.03 GB** with latency unchanged (single p50 56.65 ms against CatBoost's 53.41; batch-100 80.45
+against 88.21 — opposite directions, so noise). `@champion` is **v4**.
 
 **Three findings worth carrying forward:**
 - **D38** — the serving dependency set was *measured*, not assumed, and `pandera`, `sqlalchemy` and
@@ -238,10 +251,6 @@ site-packages).
   `requirements-api.txt` because it reached the venv via *full* `mlflow`, which `mlflow-skinny`
   drops. Only a from-scratch install distinguishes a direct dependency from an inherited one.
 
-**Still open, for your decision:** CatBoost is 269 MB of the image against LightGBM's 10 MB, while
-their PR-AUC differs by less than the 0.004 noise band (LightGBM is actually *higher* on CV:
-0.15349 vs 0.15209). Shipping LightGBM would cut ~259 MB for no measurable loss. Not changed.
-
 **Next: Phase 9 — Retraining lifecycle and promotion gate** (~3.5 h). **Read §18 A2 and A3 first.**
 - `src/evaluation/score_holdout.py` and `src/registry/promote.py` are the only modules allowed to
   unlock the 2018-05 → 08 window; `AUTHORISED_UNLOCKERS` in `src/splits.py` already names them.
@@ -252,7 +261,12 @@ their PR-AUC differs by less than the 0.004 noise band (LightGBM is actually *hi
 - PR-AUC on the holdout will be **much lower** than 0.216 for the same reason. Report **lift over
   base rate**, or an honest number reads as a broken model.
 - Promotion is **not purely a registry operation**: if a challenger ships a different library the
-  API image must be rebuilt first (noted in `requirements-api.txt`).
+  API image must be rebuilt first — and possibly **edited**, not just reinstalled. Swapping CatBoost
+  for LightGBM needed `libgomp1` in the runtime stage, an **apt** package no requirements file could
+  have predicted (D41).
+- **Consider whether the gate should apply D41's equivalence band.** It currently compares on PR-AUC
+  with a `min_delta`, so two models inside the band fail the gate even when the challenger is
+  materially cheaper to serve. That is an open design question, not a decided one.
 - `httpx2`: starlette's TestClient warns that using it with `httpx` is deprecated. A new dependency
   needs approval, so it is **not** installed; it will become an error when starlette removes the
   shim.

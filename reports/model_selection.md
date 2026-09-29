@@ -40,8 +40,8 @@ Isotonic regression, fitted on **6,812** rows (9.67% late) and evaluated on the 
 
 | Brier | Before | After | Change |
 |---|---:|---:|---:|
-| in-sample (flatters) | 0.083090 | 0.081831 | -0.001259 |
-| **held out** | 0.084318 | 0.083832 | -0.000486 |
+| in-sample (flatters) | 0.083555 | 0.081881 | -0.001674 |
+| **held out** | 0.085023 | 0.084022 | -0.001001 |
 
 The held-out row is the honest one. The in-sample figure is reported only to make the
 difference between the two visible.
@@ -58,18 +58,18 @@ through February — which would fit the calibrator on an unrepresentative slice
 
 ## Threshold
 
-Under an assumed 5:1 FN:FP cost ratio, the optimal threshold is 0.18, catching 42.5% of late orders at a 17.2% flag rate (precision 24.0%).
+Under an assumed 5:1 FN:FP cost ratio, the optimal threshold is 0.18, catching 39.8% of late orders at a 15.5% flag rate (precision 24.8%).
 
 | Quantity | Value |
 |---|---:|
-| threshold | **0.1792** |
+| threshold | **0.1774** |
 | assumed FN:FP cost ratio | 5:1 |
-| expected cost per order (FP units) | 0.4087 |
-| precision | 23.95% |
-| recall | 42.49% |
-| flag rate | 17.16% |
-| true positives / false positives | 280 / 889 |
-| false negatives / true negatives | 379 / 5,264 |
+| expected cost per order (FP units) | 0.4081 |
+| precision | 24.79% |
+| recall | 39.76% |
+| flag rate | 15.52% |
+| true positives / false positives | 262 / 795 |
+| false negatives / true negatives | 397 / 5,358 |
 
 **The cost ratio is an assumption, not a measurement.** Nothing here was derived from
 Olist's actual support costs; the ratio is a stated premise and the threshold is its
@@ -87,7 +87,7 @@ evaluation set and that is where the number should be judged.
 - **Gap: 2.019 review-score points**
 - Share scoring 1 or 2 stars: 9.2% on-time against **62.4%** late
 
-At the threshold above, catching 42.5% of late orders puts roughly 280 of the calibration window's late deliveries in reach of a proactive intervention. Whether that protects the review is an
+At the threshold above, catching 39.8% of late orders puts roughly 262 of the calibration window's late deliveries in reach of a proactive intervention. Whether that protects the review is an
 assumption this project does not test — it has no experiment, only the correlation.
 
 **Reviews are used for this analysis only.** Every review column is on the §4.2

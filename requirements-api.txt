@@ -3,13 +3,13 @@
 # MEASURED, not guessed. The list below is what a process needs to load the champion pyfunc and
 # score one record, determined by loading it and reading sys.modules (DECISIONS.md D38):
 #
-#   catboost   the shipped model                      (D35 — CatBoost won once threads were pinned)
+#   lightgbm   the shipped model                      (D41 — chosen by the equivalence band)
 #   sklearn    the isotonic calibrator (pulls scipy)
 #   joblib     the preprocessing artifact's format
 #   pandas     the frame the pyfunc takes and returns
 #   mlflow     resolving models:/...@champion and unpickling the pyfunc
 #
-# Excluded on purpose: optuna, shap, matplotlib, lightgbm, xgboost — and, after the import surgery
+# Excluded on purpose: optuna, shap, matplotlib, catboost, xgboost — and, after the import surgery
 # in D38, also **pandera, sqlalchemy and psycopg2**. Those three used to be unavoidable: the pyfunc
 # imports src.features.build, which imported src.etl.schema for a frozenset of ten column names and
 # src.db for an engine it never used at serving. Moving the denylist into the dependency-free
@@ -36,6 +36,11 @@
 # Phase 9 gate promotes a challenger that ships a different library, the image must be rebuilt
 # before that promotion can be served. Promotion is therefore not purely a registry operation, and
 # Phase 9 should say so rather than imply an alias move is always sufficient.
+#
+# This file has already changed once for that reason. It carried `catboost` when CatBoost shipped;
+# the D41 equivalence band then selected LightGBM, at a cost of 0.00020 PR-AUC and a saving of
+# 259 MB (catboost 269 MB against lightgbm 10 MB, measured with `du -sm`). The saving is the reason
+# the rule exists, and this line is the receipt.
 
 mlflow-skinny
 
@@ -49,5 +54,5 @@ pandas
 numpy
 pyarrow
 scikit-learn
-catboost
+lightgbm
 joblib

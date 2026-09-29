@@ -14,6 +14,9 @@ like a result:
 
 from __future__ import annotations
 
+from pathlib import Path
+from typing import ClassVar
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -25,6 +28,7 @@ from src.training.ensemble import (
     evaluate_blend,
     fit_blend_weights,
     fit_calibrator,
+    select_single_model,
     split_calibration_window,
     sweep_threshold,
 )
@@ -313,3 +317,106 @@ class TestCalibrationWindowSplit:
 
     def test_epsilon_keeps_log_loss_finite(self):
         assert 0 < EPSILON < 1e-3
+
+
+class TestTheSelectionBand:
+    """DECISIONS.md D41: which single model ships, when PR-AUC cannot tell them apart.
+
+    The edge cases matter more than the happy path here, because this rule decides what gets
+    deployed. The one thing it must never do is trade real accuracy for a smaller image.
+    """
+
+    COSTS: ClassVar[dict[str, int]] = {"lightgbm": 10, "xgboost": 85, "catboost": 269}
+
+    def test_the_cheapest_model_wins_inside_the_band(self):
+        """The real case, with the measured numbers from `make decide`."""
+        selection = select_single_model(
+            {"catboost": 0.21604, "lightgbm": 0.21585, "xgboost": 0.21237}, 0.005, self.COSTS
+        )
+        assert selection.chosen == "lightgbm"
+        assert selection.best_by_pr_auc == "catboost"
+        assert selection.rule_changed_the_outcome is True
+        assert "259 MB less" in selection.sentence()
+
+    def test_a_real_difference_is_never_traded_for_a_smaller_image(self):
+        """The property that makes the rule safe. A gap wider than the band is decisive."""
+        selection = select_single_model(
+            {"catboost": 0.2600, "lightgbm": 0.2100, "xgboost": 0.2000}, 0.005, self.COSTS
+        )
+        assert selection.chosen == "catboost"
+        assert selection.rule_changed_the_outcome is False
+        assert selection.contenders == ("catboost",)
+
+    def test_the_band_boundary_is_inclusive(self):
+        """A model exactly `band` below the best is equivalent, not excluded.
+
+        Pinned because an off-by-one here silently changes what ships: exclusive would make the
+        rule fire less often than the config says, and nothing else would reveal it.
+        """
+        inside = select_single_model({"catboost": 0.2200, "lightgbm": 0.2150}, 0.005, self.COSTS)
+        assert inside.chosen == "lightgbm"
+        outside = select_single_model({"catboost": 0.2200, "lightgbm": 0.21499}, 0.005, self.COSTS)
+        assert outside.chosen == "catboost"
+
+    def test_a_zero_band_disables_the_rule_entirely(self):
+        """So the behaviour can be turned off from config without touching code."""
+        selection = select_single_model({"catboost": 0.21604, "lightgbm": 0.21585}, 0.0, self.COSTS)
+        assert selection.chosen == "catboost"
+        assert selection.rule_changed_the_outcome is False
+
+    def test_the_cheapest_model_winning_on_its_own_merit_is_not_a_rule_change(self):
+        """If the cheapest is also the best, nothing was traded and the report must not imply it."""
+        selection = select_single_model({"lightgbm": 0.2200, "catboost": 0.2190}, 0.005, self.COSTS)
+        assert selection.chosen == "lightgbm"
+        assert selection.rule_changed_the_outcome is False
+        assert "also" in selection.sentence()
+
+    def test_an_unpriced_model_is_refused_rather_than_treated_as_free(self):
+        """Defaulting would let an unmeasured library win every tie by appearing to cost nothing."""
+        with pytest.raises(ValueError, match="no serving cost configured"):
+            select_single_model({"catboost": 0.21, "newthing": 0.21}, 0.005, self.COSTS)
+
+    def test_a_negative_band_is_refused(self):
+        with pytest.raises(ValueError, match="non-negative"):
+            select_single_model({"catboost": 0.21}, -0.001, self.COSTS)
+
+    def test_no_scores_is_refused(self):
+        with pytest.raises(ValueError, match="no model scores"):
+            select_single_model({}, 0.005, self.COSTS)
+
+    def test_the_result_is_deterministic_whatever_order_the_scores_arrive_in(self):
+        """Dict order must not decide what ships."""
+        forward = {"catboost": 0.2160, "lightgbm": 0.2160, "xgboost": 0.2160}
+        backward = dict(reversed(list(forward.items())))
+        assert (
+            select_single_model(forward, 0.005, self.COSTS).chosen
+            == select_single_model(backward, 0.005, self.COSTS).chosen
+            == "lightgbm"
+        )
+
+    def test_the_band_matches_the_reproducibility_floor_measured_in_d35(self):
+        """The band's value is an argument, not a preference, so it is pinned to its source.
+
+        D35 measured CatBoost moving 0.21344 -> 0.20850 on identical data and hyperparameters when
+        only the thread count changed. If someone widens the band, this test makes them confront
+        that the justification no longer holds.
+        """
+        import yaml
+
+        config = yaml.safe_load(Path("configs/base.yaml").read_text(encoding="utf-8"))
+        band = config["decision"]["selection_band_pr_auc"]
+        measured_thread_count_spread = 0.21344 - 0.20850
+        assert band == pytest.approx(measured_thread_count_spread, abs=1e-4), (
+            "the band is justified as D35's measured reproducibility floor; changing it needs a "
+            "new measurement, not a new preference"
+        )
+
+    def test_every_supported_model_has_a_configured_cost(self):
+        """Otherwise the rule raises at decision time, after the expensive part has already run."""
+        import yaml
+
+        from src.training.tune import SUPPORTED
+
+        config = yaml.safe_load(Path("configs/base.yaml").read_text(encoding="utf-8"))
+        costs = config["decision"]["serving_cost_mb"]
+        assert set(SUPPORTED) <= set(costs), f"missing: {sorted(set(SUPPORTED) - set(costs))}"

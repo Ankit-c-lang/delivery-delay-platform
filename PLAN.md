@@ -1374,8 +1374,35 @@ document. All 117 packages install as binary wheels on Python 3.12 — no source
 MLflow 3 strengthens the narrative rather than weakening it: stages being gone makes the
 champion/challenger alias design mandatory rather than merely current.
 
+### A8 — Model selection needed an equivalence band *(severity: medium, added 2026-09-29 in Phase 8)*
+
+**Defect.** §6.5 selects the single model with the highest calibration-window PR-AUC. That is only
+meaningful if the differences it ranks are larger than the noise the pipeline can reproduce, and
+Phase 8 measured that they are not: the three GBDTs span about 0.004, while **thread count alone**
+moved CatBoost by **0.005** on identical data with identical hyperparameters (DECISIONS.md D35).
+Selecting on the fourth decimal place was selecting on the environment.
+
+**Resolution.** Selection gains an **equivalence band**, `decision.selection_band_pr_auc`, set to
+D35's measured reproducibility floor of 0.005. Models within the band of the best are treated as
+indistinguishable, and the tie is broken on **serving cost** — the installed size of the library the
+API image must carry, measured at 10 MB (LightGBM), 85 MB (XGBoost), 269 MB (CatBoost).
+
+Applied, this ships **LightGBM over CatBoost at a cost of 0.00020 PR-AUC and a saving of 259 MB**,
+in an image that was 1.62 GB. A model more than the band below the best is not a contender at any
+price: the rule never trades accuracy for size, it settles ties accuracy cannot settle.
+
+**Why this is an amendment and not an implementation detail.** It changes what ships, so it changes
+what §6.5 means. It was deliberately *not* done as a manual override — `configs/base.yaml` already
+argues that a decision should be "a threshold, not a mood", and a hand-picked model would not be
+explainable from the code.
+
+**Consequence for §8.** The promotion gate compares challenger against champion on PR-AUC with a
+`min_delta` and knows nothing about the band, so two models inside it would fail the gate even when
+the challenger is materially cheaper to serve. Whether the gate applies the same band is a Phase 9
+design decision (DECISIONS.md D41).
+
 ### Not changed
 
-The architecture, scope boundaries, §3 cut-order, model selection, MLflow run structure,
-CI/CD design and §12 repository layout all survived review unaltered. None of these
-findings challenged the design; they are corrections within it.
+The architecture, scope boundaries, §3 cut-order, MLflow run structure, CI/CD design and §12
+repository layout all survived review unaltered. **Model selection did not** — see A8, which was
+added during Phase 8 rather than in the original review.

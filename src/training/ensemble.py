@@ -42,6 +42,10 @@ logger = logging.getLogger(__name__)
 #: Probabilities are clipped away from 0 and 1 before log-loss, which is otherwise infinite.
 EPSILON = 1e-7
 
+#: Slack on the selection band's boundary comparison, absorbing float64 subtraction error only.
+#: Twelve orders of magnitude below the band itself, so it can never widen the rule in practice.
+BAND_EPSILON = 1e-12
+
 
 @dataclass(frozen=True)
 class BlendResult:
@@ -287,6 +291,121 @@ def evaluate_blend(
         delta=delta,
         min_gain=min_gain,
         ship_ensemble=delta >= min_gain,
+    )
+
+
+@dataclass(frozen=True)
+class ModelSelection:
+    """Which single model ships, and why it rather than the top of the PR-AUC table.
+
+    Attributes:
+        chosen: The model that ships.
+        best_by_pr_auc: The highest-scoring model. Differs from ``chosen`` only when the rule fired.
+        scores: PR-AUC per model, on the rows the comparison used.
+        costs_mb: Installed size of each model's library, from ``configs/base.yaml``.
+        band: How far below the best a model may score and still be considered equivalent.
+        contenders: Models inside the band, cheapest first.
+        rule_changed_the_outcome: Whether the tie-break moved the decision.
+    """
+
+    chosen: str
+    best_by_pr_auc: str
+    scores: dict[str, float]
+    costs_mb: dict[str, int]
+    band: float
+    contenders: tuple[str, ...]
+    rule_changed_the_outcome: bool
+
+    def sentence(self) -> str:
+        """One line for the log and the report."""
+        if not self.rule_changed_the_outcome:
+            others = [name for name in self.contenders if name != self.chosen]
+            if others:
+                # Accuracy matters here: "nothing else was close" and "others were close
+                # but this one is also cheapest" are different facts; do not blur them.
+                return (
+                    f"ship {self.chosen}: highest PR-AUC ({self.scores[self.chosen]:.5f}) and also "
+                    f"the cheapest of the {len(self.contenders)} models inside the "
+                    f"{self.band:.3f} equivalence band"
+                )
+            return (
+                f"ship {self.chosen}: highest PR-AUC ({self.scores[self.chosen]:.5f}), and no "
+                f"other model is within the {self.band:.3f} equivalence band"
+            )
+        gap = self.scores[self.best_by_pr_auc] - self.scores[self.chosen]
+        saved = self.costs_mb[self.best_by_pr_auc] - self.costs_mb[self.chosen]
+        return (
+            f"ship {self.chosen} ({self.scores[self.chosen]:.5f}) over {self.best_by_pr_auc} "
+            f"({self.scores[self.best_by_pr_auc]:.5f}): the {gap:.5f} gap is inside the "
+            f"{self.band:.3f} equivalence band, and {self.chosen} costs "
+            f"{self.costs_mb[self.chosen]} MB against {self.costs_mb[self.best_by_pr_auc]} MB "
+            f"— {saved} MB less in the serving image"
+        )
+
+
+def select_single_model(
+    scores: dict[str, float], band: float, costs_mb: dict[str, int]
+) -> ModelSelection:
+    """Pick the single model to ship: best PR-AUC, then cheapest inside the equivalence band.
+
+    Args:
+        scores: PR-AUC per model, all measured on the same rows.
+        band: Width of the equivalence band. A model scoring within ``band`` of the best is
+            treated as indistinguishable from it.
+        costs_mb: Installed size of each model's library in MB.
+
+    Returns:
+        A :class:`ModelSelection` carrying the choice and the reasoning.
+
+    Raises:
+        ValueError: If ``scores`` is empty, ``band`` is negative, or a scored model has no cost
+            entry. A missing cost is refused rather than defaulted: a model whose cost is unknown
+            would silently win every tie by looking free.
+
+    **Why a band at all.** DECISIONS.md D35 measured this pipeline's reproducibility floor: thread
+    count alone moved CatBoost's calibration-window PR-AUC by 0.005 on identical data and
+    identical hyperparameters. A gap smaller than that is not a result, it is the environment — so
+    declaring a winner inside the band claims a difference already shown to be irreproducible.
+
+    **Why serving cost is the tie-break.** The shipped model's library has to be installed in the
+    API image, measured at 10 MB (LightGBM) to 269 MB (CatBoost). Inside the band that is the only
+    difference between the candidates that anyone can observe. Ordering by cost keeps the choice a
+    rule rather than a preference — the same reason ``min_ensemble_gain_pr_auc`` is a number in
+    ``configs/base.yaml`` instead of a judgement made per run.
+
+    The band never overrides a real difference: a model more than ``band`` below the best is not a
+    contender at any price.
+    """
+    if not scores:
+        raise ValueError("no model scores to select from")
+    if band < 0:
+        raise ValueError(f"selection band must be non-negative, got {band}")
+    missing = sorted(set(scores) - set(costs_mb))
+    if missing:
+        raise ValueError(
+            f"no serving cost configured for {missing}; add it to decision.serving_cost_mb in "
+            "configs/base.yaml. Defaulting would let an unmeasured model win every tie by "
+            "appearing to cost nothing."
+        )
+
+    best = max(scores, key=lambda name: scores[name])
+    # BAND_EPSILON, not a bare <=. Subtracting two float64 PR-AUCs that differ by exactly the band
+    # can land a hair above it — 0.2200 - 0.2150 evaluates to 0.005000000000000004 — so a model
+    # sitting precisely on the documented boundary would be excluded by float representation alone.
+    # A rule about ignoring differences too small to reproduce should not itself turn on one.
+    within = [name for name in scores if scores[best] - scores[name] <= band + BAND_EPSILON]
+    # Cheapest first; ties on cost broken by PR-AUC, then by name so the result is deterministic
+    # whatever order the dict arrived in.
+    contenders = sorted(within, key=lambda name: (costs_mb[name], -scores[name], name))
+    chosen = contenders[0]
+    return ModelSelection(
+        chosen=chosen,
+        best_by_pr_auc=best,
+        scores=dict(scores),
+        costs_mb={name: costs_mb[name] for name in scores},
+        band=float(band),
+        contenders=tuple(contenders),
+        rule_changed_the_outcome=chosen != best,
     )
 
 
@@ -592,10 +711,21 @@ def build_decision(version: str = "v1", run_shap: bool = True) -> dict[str, Any]
         blend.ship_ensemble,
     )
 
-    chosen = "blend" if blend.ship_ensemble else blend.best_single
-    if chosen == "blend":
+    # The blend-vs-single comparison above stays on pure PR-AUC — that is the honest answer to
+    # "did blending help". Which SINGLE model ships is a separate question, and the equivalence
+    # band answers it (DECISIONS.md D41).
+    selection = None
+    if blend.ship_ensemble:
+        chosen = "blend"
         scores_cal = blend_probabilities(probabilities, weights)
     else:
+        selection = select_single_model(
+            blend.single_pr_auc,
+            decision_cfg["selection_band_pr_auc"],
+            decision_cfg["serving_cost_mb"],
+        )
+        chosen = selection.chosen
+        logger.info("selection: %s", selection.sentence())
         scores_cal = probabilities[chosen]
 
     calibration = fit_calibrator(scores_cal[calib_half], y_cal[calib_half])
@@ -748,6 +878,47 @@ def write_report(result: dict[str, Any], path: Path = REPORT_PATH) -> None:
         "through February — which would fit the calibrator on an unrepresentative slice. See",
         "`DECISIONS.md` D28.",
         "",
+    ]
+
+    selection = result.get("selection")
+    if selection is not None:
+        best_score = selection.scores[selection.best_by_pr_auc]
+        lines += [
+            "## Which single model ships (the equivalence band)",
+            "",
+            selection.sentence() + ".",
+            "",
+            "| Model | PR-AUC | gap to best | library | inside the band |",
+            "|---|---:|---:|---:|:--:|",
+        ]
+        for name in sorted(selection.scores, key=lambda n: -selection.scores[n]):
+            marker = " **(ships)**" if name == selection.chosen else ""
+            lines.append(
+                f"| `{name}`{marker} | {selection.scores[name]:.5f} | "
+                f"{best_score - selection.scores[name]:.5f} | {selection.costs_mb[name]} MB | "
+                f"{'yes' if name in selection.contenders else 'no'} |"
+            )
+        lines += [
+            "",
+            f"The band is **{selection.band:.3f} PR-AUC**, and it is not an arbitrary tolerance:",
+            "it is the amount **thread count alone** moved CatBoost's score in `DECISIONS.md` D35,",
+            "on identical data with identical hyperparameters. That is this pipeline's measured",
+            "reproducibility floor, so a gap narrower than it is the environment rather than a",
+            "result — declaring a winner inside it would claim a difference already shown to be",
+            "irreproducible.",
+            "",
+            "Inside the band the tie is broken on **serving cost**, the only remaining",
+            "difference anyone can observe: the shipped model's library is installed in the",
+            "API image, 10 MB for LightGBM against 269 MB for CatBoost (`DECISIONS.md` D38).",
+            "The rule lives in `configs/base.yaml` so the choice is a threshold, not a mood —",
+            "the same reason `min_ensemble_gain_pr_auc` is a number in that file.",
+            "",
+            "A model more than the band below the best is **not** a contender at any price:",
+            "the rule never trades accuracy for size, it settles ties accuracy cannot settle.",
+            "",
+        ]
+
+    lines += [
         "## Threshold",
         "",
         threshold.sentence(),

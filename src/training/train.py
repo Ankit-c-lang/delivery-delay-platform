@@ -51,6 +51,7 @@ from src.training.ensemble import (
     evaluate_blend,
     fit_blend_weights,
     fit_calibrator,
+    select_single_model,
     split_calibration_window,
     sweep_threshold,
 )
@@ -289,12 +290,24 @@ def train(version: str = "v1", register: bool = True) -> TrainingResult:
                 weights,
                 decision_cfg["min_ensemble_gain_pr_auc"],
             )
-            shipped = "blend" if blend.ship_ensemble else blend.best_single
-            scores_cal = (
-                blend_probabilities(probabilities, weights)
-                if shipped == "blend"
-                else probabilities[shipped]
-            )
+            # select_single_model, NOT `blend.best_single`. This line used to re-derive the
+            # shipping decision inline, so when ensemble.build_decision gained the equivalence
+            # band (DECISIONS.md D41) the two disagreed and v3 was registered as catboost while
+            # `make decide` had chosen lightgbm. The rule now has one implementation and this is a
+            # caller of it — the same shape of bug as D33 and D38, and the same fix.
+            if blend.ship_ensemble:
+                shipped = "blend"
+                selection = None
+                scores_cal = blend_probabilities(probabilities, weights)
+            else:
+                selection = select_single_model(
+                    blend.single_pr_auc,
+                    decision_cfg["selection_band_pr_auc"],
+                    decision_cfg["serving_cost_mb"],
+                )
+                shipped = selection.chosen
+                logger.info("selection: %s", selection.sentence())
+                scores_cal = probabilities[shipped]
 
             calibration = fit_calibrator(scores_cal[calib_half], y_cal[calib_half])
             calibrated_all = calibration.calibrator.predict(scores_cal)
@@ -377,6 +390,9 @@ def train(version: str = "v1", register: bool = True) -> TrainingResult:
             blend=blend,
             threshold=threshold.threshold,
             calibration_pr_auc=summarize(y_cal, calibrated_all)["pr_auc"],
+            # Passed in rather than re-derived from `blend`: deriving it here is exactly how the
+            # tag came to disagree with the pyfunc's own model (D41).
+            shipped_model=shipped,
         )
 
     return TrainingResult(
@@ -408,6 +424,7 @@ def _assign_alias(
     blend: Any,
     threshold: float,
     calibration_pr_auc: float,
+    shipped_model: str,
 ) -> tuple[str, str]:
     """Tag the new registry version and give it an alias.
 
@@ -443,7 +460,7 @@ def _assign_alias(
         REGISTERED_MODEL_NAME, latest_version, "split_version", version_key
     )
     client.set_model_version_tag(
-        REGISTERED_MODEL_NAME, latest_version, "shipped_model", blend.best_single
+        REGISTERED_MODEL_NAME, latest_version, "shipped_model", shipped_model
     )
     client.set_model_version_tag(
         REGISTERED_MODEL_NAME, latest_version, "blend_delta_pr_auc", f"{blend.delta:.5f}"

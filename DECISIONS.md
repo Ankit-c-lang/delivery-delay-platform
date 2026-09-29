@@ -1360,3 +1360,83 @@ Single-record latency is unchanged by containerization. Batch-100 through the pu
 container removes 25 of those 33 ms, which places the cost in **Docker's port-forwarding path for a
 ~60 KB request body** — about 0.25 ms per record of pure plumbing. Worth knowing before anyone reads
 the batch number as a model or runtime regression; it is neither.
+
+---
+
+## D41
+### Model selection has an equivalence band, and ties break on serving cost
+**Date.** 2026-09-29 (Phase 8, amending PLAN.md §6.5 — see §18 A8)
+
+**Decision.** `select_single_model` picks the highest-PR-AUC model, then, among models within
+`decision.selection_band_pr_auc` of it, ships the one with the lowest
+`decision.serving_cost_mb`. The band is **0.005**. Applied, it ships **LightGBM (0.21585)** over
+**CatBoost (0.21604)** — a gap of **0.00020**, for **259 MB** less in the serving image.
+
+**Why a band, and why that number.** D35 measured this pipeline's reproducibility floor: thread
+count alone moved CatBoost's calibration-window PR-AUC from 0.21344 to 0.20850 — 0.005 — on
+identical data with identical hyperparameters. A gap narrower than that is the environment, not a
+result. Declaring a winner inside the band would claim a difference already proven irreproducible,
+which is the same error D35 caught, just committed deliberately. The observed gap here is 0.00020:
+**25 times narrower than the floor.**
+
+**Why serving cost is the tie-break.** Inside the band it is the only difference anyone can observe.
+The shipped model's library is installed in the API image — measured at 10 MB (LightGBM), 85 MB
+(XGBoost), 269 MB (CatBoost) — and CatBoost was the single largest item in a 1.62 GB image. LightGBM
+also trains 3× faster (69 s against 209 s in the tuning run), which matters for Phase 9's retraining
+loop.
+
+**Why a rule rather than a one-off swap.** The alternative was to hand-pick LightGBM. That was
+rejected: `configs/base.yaml` already argues, about `min_ensemble_gain_pr_auc`, that a decision
+should be "a threshold, not a mood". A manual override would make the shipped model unexplainable
+from the code, which is a worse defect than 259 MB. The band lives in config, the rule is a pure
+function with tests, and the report prints the table and the reasoning.
+
+**Guard rails, each tested.** A model more than the band below the best is **not** a contender at any
+price — the rule never trades accuracy for size, it only settles ties accuracy cannot settle. A band
+of 0.0 disables it from config. A model with no configured cost raises rather than being treated as
+free, because an unpriced library would otherwise win every tie by appearing weightless. Ordering is
+deterministic regardless of dict order. And a test pins the band to D35's measured spread, so
+widening it requires a new measurement rather than a new preference.
+
+**A float-boundary detail that the tests caught.** `scores[best] - scores[name] <= band` excludes a
+model sitting *exactly* on the boundary, because `0.2200 - 0.2150` evaluates to
+`0.005000000000000004` in float64. A rule about ignoring differences too small to reproduce should
+not itself turn on one, so the comparison carries a `BAND_EPSILON` of 1e-12 — twelve orders of
+magnitude below the band, so it cannot widen the rule in practice.
+
+**It immediately exposed a duplicated decision, which is the third time this shape of bug has
+appeared.** `train.py` re-derived the shipping choice inline as
+`"blend" if blend.ship_ensemble else blend.best_single`. So the moment `build_decision` gained the
+band, the two disagreed: `make decide` chose LightGBM while `make train` registered **v3 as
+CatBoost**, tag and pyfunc both. `train.py` now calls `select_single_model`, and `shipped_model` is
+passed into `_assign_alias` rather than re-derived from `blend` there as well. The pattern —
+D33 (a validated config value nothing enforced), D38 (a dependency list written from what the code
+looked like it needed), and now this — is one idea expressed in two places, drifting apart while
+both halves keep passing their own tests.
+
+**Registry consequence.** `@champion` moved to **v4** (lightgbm). **v2** is tagged `superseded` —
+it was the correct answer under the pre-D41 rule, so it is not withdrawn as broken. **v3** is tagged
+`withdrawn: do not deploy`, because it was produced by the disagreement above. Re-pointing the alias
+is *applying a changed selection rule*, not promoting on merit: the gate still owns promotion
+between candidates that the same rule produced, which from here means v4 against v5.
+
+**Swapping the shipped model changed the image's SYSTEM dependencies, not just its Python ones.**
+The first LightGBM image built and started, then failed at model load with
+`OSError: libgomp.so.1: cannot open shared object file`. LightGBM links against the OpenMP runtime,
+`python:3.12-slim` does not ship it, and CatBoost had evidently bundled or statically linked its own —
+so nothing in `requirements-api.txt` could have predicted this. The runtime stage now installs
+`libgomp1` (~150 KB with `--no-install-recommends`).
+
+That sharpens the operational coupling already noted in `requirements-api.txt`: a promotion that
+changes the shipped library may need an **apt** package as well as a pip one, so "rebuild the image"
+can mean "edit the Dockerfile", not merely "reinstall the requirements". Phase 9 should say that
+plainly rather than imply an alias move is ever sufficient on its own.
+
+**Measured saving.** Image **1.62 GB → 1.03 GB**, a 590 MB reduction — more than the 259 MB of
+CatBoost's own wheel, because dropping it also drops what it pulled in.
+
+**Open question handed to Phase 9.** The gate compares challenger against champion on PR-AUC with a
+`min_delta`, and knows nothing about the equivalence band. Two models inside the band would fail the
+gate on PR-AUC even when the challenger is materially cheaper to serve. Whether the gate should
+apply the same band — and if so, whether "cheaper inside the band" is grounds for promotion — is a
+Phase 9 design decision, not something to settle here.

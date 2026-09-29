@@ -48,6 +48,26 @@ decision:
   # §13 Phase 5: "If the gain is under 0.005 PR-AUC, say plainly that the single model should
   # ship." Encoded so the decision is a threshold, not a mood.
   min_ensemble_gain_pr_auc: 0.005
+  # SELECTION BAND: how close two models must be before PR-AUC stops deciding between them.
+  #
+  # Set to the amount thread count ALONE moved CatBoost's calibration-window PR-AUC in
+  # DECISIONS.md D35 (0.21344 at ten threads against 0.20850 at four, on identical data and
+  # identical hyperparameters). That number is this pipeline's measured reproducibility floor, so a
+  # gap smaller than it is not a result — it is the environment. Claiming a winner inside the band
+  # would be claiming a difference we have already proved we cannot reproduce.
+  #
+  # Within the band the tie is broken on SERVING COST, not on the fourth decimal place: the shipped
+  # model's library has to be installed in the API image, and that ranges from 10 MB for LightGBM to
+  # 269 MB for CatBoost (measured, D38). The rule exists so this is a threshold rather than a mood,
+  # the same reason min_ensemble_gain_pr_auc is a number in this file and not a judgement call.
+  selection_band_pr_auc: 0.005
+  # Installed wheel size per library, in MB, measured in the dev venv with `du -sm`. Used only to
+  # order models inside the band; it never overrides a difference larger than it.
+  serving_cost_mb:
+    lightgbm: 10
+    xgboost: 85
+    catboost: 269
+
   # How the calibration window is divided between fitting blend weights and fitting the
   # calibrator. "interleaved" keeps both halves at the window's base rate; "temporal" splits
   # by date but leaves halves at 5.74% and 13.77% (DECISIONS.md D28).

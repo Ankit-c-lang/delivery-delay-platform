@@ -339,7 +339,10 @@ class TestAliasAssignment:
             fit=SimpleNamespace(start="2017-05-01", end="2017-12-31"),
             calibrate=SimpleNamespace(start="2018-01-01", end="2018-02-28"),
         )
-        blend = SimpleNamespace(best_single="xgboost", delta=-0.00156)
+        # best_single is deliberately NOT what ships. `_assign_alias` takes `shipped_model`
+        # separately so the tag cannot be re-derived from the blend — that re-derivation is the
+        # D41 bug, which registered CatBoost while `make decide` had chosen LightGBM.
+        blend = SimpleNamespace(best_single="catboost", delta=-0.00156)
         return splits, blend
 
     def test_the_first_version_becomes_champion_uncontested(self, registry):
@@ -347,7 +350,7 @@ class TestAliasAssignment:
         client, module = registry
         self._make_version(client, module)
         splits, blend = self._stubs()
-        version, alias = module._assign_alias("v1", splits, blend, 0.2069, 0.2025)
+        version, alias = module._assign_alias("v1", splits, blend, 0.2069, 0.2025, "lightgbm")
         assert version == "1"
         assert alias == module.CHAMPION_ALIAS
         # str() on MLflow's own return: it gives an int from a SQLite store and a str over
@@ -364,10 +367,10 @@ class TestAliasAssignment:
         client, module = registry
         self._make_version(client, module)
         splits, blend = self._stubs()
-        module._assign_alias("v1", splits, blend, 0.2069, 0.2025)
+        module._assign_alias("v1", splits, blend, 0.2069, 0.2025, "lightgbm")
 
         self._make_version(client, module)
-        version, alias = module._assign_alias("v2", splits, blend, 0.2200, 0.2100)
+        version, alias = module._assign_alias("v2", splits, blend, 0.2200, 0.2100, "lightgbm")
         assert version == "2"
         assert alias == module.CHALLENGER_ALIAS
         # The champion must still be v1.
@@ -382,12 +385,14 @@ class TestAliasAssignment:
         client, module = registry
         self._make_version(client, module)
         splits, blend = self._stubs()
-        module._assign_alias("v1", splits, blend, 0.2069, 0.2025)
+        module._assign_alias("v1", splits, blend, 0.2069, 0.2025, "lightgbm")
         tags = client.get_model_version(module.REGISTERED_MODEL_NAME, "1").tags
         assert tags["evaluation_pr_auc"].startswith("pending")
         assert tags["calibration_window_pr_auc"] == "0.20250"
         assert tags["training_window"] == "2017-05-01..2017-12-31"
-        assert tags["shipped_model"] == "xgboost"
+        # The tag must come from the `shipped_model` ARGUMENT, not from `blend.best_single` —
+        # the stub deliberately sets those to different values (D41).
+        assert tags["shipped_model"] == "lightgbm" != blend.best_single
 
     def test_describe_registry_reports_aliases(self, registry):
         """Guards a real bug: `search_model_versions` returns an empty `aliases` field on every
@@ -396,7 +401,7 @@ class TestAliasAssignment:
         client, module = registry
         self._make_version(client, module)
         splits, blend = self._stubs()
-        module._assign_alias("v1", splits, blend, 0.2069, 0.2025)
+        module._assign_alias("v1", splits, blend, 0.2069, 0.2025, "lightgbm")
 
         # Confirm the trap still exists in this MLflow version, so the test stays meaningful.
         searched = client.search_model_versions(f"name='{module.REGISTERED_MODEL_NAME}'")
@@ -407,7 +412,7 @@ class TestAliasAssignment:
 
         rows = module.describe_registry()
         assert rows[0]["aliases"] == ["champion"]
-        assert rows[0]["shipped_model"] == "xgboost"
+        assert rows[0]["shipped_model"] == "lightgbm"
 
 
 class TestTheRealRegistry:

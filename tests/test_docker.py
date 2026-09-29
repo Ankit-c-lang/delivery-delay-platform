@@ -185,21 +185,24 @@ class TestTheServingRequirements:
         assert "mlflow-skinny" in listed
         assert "mlflow" not in listed, "the full mlflow brings a server and a UI the API never runs"
 
-    def test_the_shipped_model_s_library_is_present(self):
-        """Whatever the pyfunc pickles must be installed, or the artifact cannot unpickle."""
-        import json as _json
+    def test_exactly_one_boosting_library_is_installed(self):
+        """Whatever the pyfunc pickles must be installed, and nothing else should be.
 
-        from src.features.artifact import PreprocessingArtifact  # noqa: F401
-
+        This file deliberately tracks the champion, so it must change when the shipped model does —
+        that coupling is the point (DECISIONS.md D41's operational note). LightGBM ships because the
+        equivalence band chose it; catboost's 269 MB and xgboost's 85 MB are dead weight in a
+        serving image that will never load them.
+        """
         listed = {
             line.strip().lower()
             for line in API_REQUIREMENTS.read_text(encoding="utf-8").splitlines()
             if line.strip() and not line.startswith("#")
         }
-        del _json
-        assert "catboost" in listed, (
-            "CatBoost ships (DECISIONS.md D35), so its wheel is a serving dependency; without it "
-            "the artifact raises on unpickle"
+        boosting = listed & {"lightgbm", "xgboost", "catboost"}
+        assert boosting == {"lightgbm"}, (
+            f"expected exactly lightgbm, found {sorted(boosting)}. Without the shipped model's "
+            "library the artifact raises on unpickle; with the others, the image carries megabytes "
+            "it never loads."
         )
 
 
