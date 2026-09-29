@@ -56,11 +56,14 @@ reports/*
 !reports/feature_matrix.md
 !reports/phase4_models.md
 !reports/model_selection.md
-# SHAP plots are small PNGs and are the evidence for the feature audit.
-!reports/shap/
-!reports/shap/*.png
 *.png
 !docs/**/*.png
+# The SHAP plots are the evidence behind the §5 feature audit and a cloner cannot regenerate
+# them without the (non-committable) dataset. 313 KB across 5 files.
+# These negations must come AFTER `*.png`: in gitignore the last matching rule wins, so
+# placing them earlier left the plots ignored.
+!reports/shap/
+!reports/shap/*.png
 
 # --- Editor / OS --------------------------------------------------------------
 .vscode/
