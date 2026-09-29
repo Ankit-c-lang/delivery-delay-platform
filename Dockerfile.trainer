@@ -1,0 +1,34 @@
+# The training stack, for running a training job in a container instead of the venv.
+#
+# Deliberately single-stage and unoptimised: it is a convenience, not a deployment. PLAN.md §3
+# lists the trainer profile as the first thing to cut under time pressure, and §10.1's careful
+# multi-stage split exists to keep the SERVING image small — an argument that does not transfer to
+# an image nobody ships.
+#
+# It is not built by `docker compose up`; `profiles: ["training"]` keeps it out. Build it with
+#   docker compose --profile training build trainer
+# and expect it to be roughly an order of magnitude larger than delay-api:local, because it carries
+# optuna, shap, matplotlib and all three boosting libraries.
+FROM python:3.12-slim
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends build-essential libgomp1 \
+ && rm -rf /var/lib/apt/lists/*
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+RUN useradd --create-home --uid 1000 --shell /usr/sbin/nologin appuser
+WORKDIR /app
+
+# configs/ is copied here but not into the serving image: training reads configs/splits.yaml and
+# configs/models.yaml, and serving reads neither — every boundary it needs is inside the artifact.
+COPY --chown=1000:1000 src/ ./src/
+COPY --chown=1000:1000 configs/ ./configs/
+
+USER appuser
+CMD ["python", "-m", "src.training.train", "--version", "v1"]

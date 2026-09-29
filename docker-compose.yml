@@ -1,9 +1,16 @@
-# Phase 0 skeleton: infrastructure only. The `api` service arrives in Phase 8, and a
-# `trainer` service under `profiles: ["training"]` is optional (PLAN.md §10.2).
+# Infrastructure plus the API (PLAN.md §10.2). A `trainer` service under
+# `profiles: ["training"]` is defined but does not start by default.
 #
-# The project name is explicit so container, volume and network prefixes never depend on
-# the directory name. This machine also runs realtime-fraud-detection; an ambiguous
-# project name is how one project's teardown deletes another's volume.
+# `docker compose up` is the whole deployment story ONLY once a model is registered. On a clean
+# machine the registry is empty, the API cannot resolve @champion, and it will correctly report
+# itself unhealthy. Run `make bootstrap` first (§18 A5).
+#
+# NEVER `docker compose down -v`: it deletes named volumes, and run from the wrong directory it
+# deletes another project's.
+#
+# The project name below is explicit so container, volume and network prefixes never depend on the
+# directory name. This machine also runs realtime-fraud-detection, and an ambiguous project name is
+# how one project's teardown deletes another's volume.
 name: delay-prediction
 
 services:
@@ -42,6 +49,15 @@ services:
     # Run as the host user so files written into the bind mounts stay owned by us and
     # can be removed without sudo. id -u is 1000 on this machine.
     user: "1000:1000"
+    environment:
+      # MLflow 3 validates the Host header against an allowlist as DNS-rebinding protection, and
+      # the DEFAULT list is localhost addresses plus private-IP patterns only. A container reaching
+      # the server by its Compose service name sends `Host: mlflow:5000`, which matches nothing, so
+      # every registry call comes back 403 "Invalid Host header - possible DNS rebinding attack
+      # detected" (DECISIONS.md D40). Setting this variable REPLACES the defaults rather than
+      # extending them, so the localhost entries have to be repeated or host-side tooling breaks.
+      MLFLOW_SERVER_ALLOWED_HOSTS: "mlflow:*,localhost:*,127.0.0.1:*,[[]::1]:*,localhost,127.0.0.1"
+
     # A file-based backend store is required for the Model Registry — plain ./mlruns
     # filesystem tracking does not support it (PLAN.md §7). Four slashes: an absolute
     # path. --serve-artifacts proxies artifact I/O through the tracking server, so
@@ -74,6 +90,68 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: delay-api:local
+    container_name: delay-api
+    restart: unless-stopped
+    user: "1000:1000"
+    environment:
+      # http://mlflow:5000, not 127.0.0.1: inside the network the host loopback is the
+      # container's own. This is the one variable that MUST differ from the host's .env value,
+      # which is why it is set here explicitly rather than passed through.
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MODEL_URI: ${MODEL_URI:-models:/delivery_delay_classifier@champion}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      # Host 8001 -> container 8000. 8000 belongs to realtime-fraud-detection on this machine
+      # (CLAUDE.md invariant 10). The container always listens on 8000 internally.
+      - "127.0.0.1:${API_PORT:-8001}:8000"
+    depends_on:
+      mlflow:
+        condition: service_healthy
+    # Deliberately NOT depends_on postgres. §10.2 lists both, but the serving path was measured
+    # (DECISIONS.md D38) and the API never opens a database connection: the as-of snapshots it
+    # needs are bundled inside the artifact, which is the whole point of §6.2. Declaring a
+    # dependency the service does not have would delay its start behind an unrelated healthcheck
+    # and misdescribe the graph to anyone reading this file.
+
+  # Optional: the training stack, which needs the FULL requirements.txt rather than the serving
+  # subset. `profiles` keeps it out of a plain `docker compose up` — it is not part of the
+  # deployment, it is a convenience for running a training job in a container instead of the venv.
+  #
+  # NOT BUILT OR VERIFIED. Its image would carry optuna, shap, matplotlib and all three boosting
+  # libraries, roughly an order of magnitude larger than the API image, and PLAN.md §3 lists the
+  # trainer profile as the first thing to cut under time pressure. Build it with
+  # `docker compose --profile training build trainer` when it is actually wanted.
+  trainer:
+    profiles: ["training"]
+    build:
+      context: .
+      dockerfile: Dockerfile.trainer
+    image: delay-trainer:local
+    container_name: delay-trainer
+    user: "1000:1000"
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env}
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+    volumes:
+      - ./data:/app/data:ro
+      - ./artifacts:/app/artifacts
+      - ./reports:/app/reports
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+    command: ["python", "-m", "src.training.train", "--version", "v1"]
 
 volumes:
   pgdata:

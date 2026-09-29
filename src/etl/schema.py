@@ -18,23 +18,13 @@ from __future__ import annotations
 import pandera.pandas as pa
 from pandera.dtypes import Timestamp
 
-# PLAN.md §4.2. `order_status` is included even though the population is filtered to
-# 'delivered' — it is then a constant, and a constant that encodes the filter is exactly
-# the shape of a leak that survives review.
-DENYLIST: frozenset[str] = frozenset(
-    {
-        "order_approved_at",
-        "order_delivered_carrier_date",
-        "order_delivered_customer_date",
-        "order_status",
-        "review_id",
-        "review_score",
-        "review_comment_title",
-        "review_comment_message",
-        "review_creation_date",
-        "review_answer_timestamp",
-    }
-)
+from src.contract import DENYLIST
+
+# PLAN.md §4.2's denylist is defined in `src/contract.py`, which imports nothing, and re-exported
+# here so every existing reader keeps working. It moved because `construct_features` enforces it on
+# every served prediction, and importing it from this module pulled pandera into the serving image
+# for the sake of a frozenset of ten strings (DECISIONS.md D38).
+__all__ = ["DENYLIST", "ORDERS_ANALYTICAL_SCHEMA"]
 
 # `order_delivered_customer_date` is genuinely needed by the §4.5 as-of snapshot rule, which
 # §18 A1 rewrote to filter on delivery *outcome* time. It does not live in

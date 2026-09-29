@@ -61,6 +61,9 @@ module does not exist yet is not written (DECISIONS.md D15).
 
 - `make serve` (API on **8001**, docs at `/docs`) · `make bench` (p50/p95; `URL=` to hit a
   running service, `N=` iterations)
+- `make build` (API image) · `make api-up | api-down | api-logs` · `make bootstrap`
+  **`bootstrap` is required before `docker compose up` on a clean machine** (§18 A5): the API
+  resolves `@champion` at startup and a fresh registry has none.
 
 **Arrive with their phase:**
 - `promote` (9)
@@ -218,12 +221,38 @@ seller states (`AM`, `MA`, `PI`) and 43 product categories. The categories are *
 `CATEGORY_CAP = 30` collapses the other 42 by design — which is why the warning says "not among
 the levels this model was trained on" rather than "never seen".
 
-**Next: Phase 8 — Docker and Compose** (~3 h). **Read §18 A5 first.**
-- `make bootstrap` is **required before `docker compose up`** on a clean machine: the API resolves
-  `@champion` at startup and a fresh registry has none.
-- `requirements-api.txt` now carries **catboost**, because CatBoost ships (D35). Verify the pyfunc
-  loads under `mlflow-skinny` and measure the image size, which is the justification that file asks
-  for. `xgboost` and `lightgbm` were removed — but read the coupling note in that file first.
+**Phase 8 COMPLETE.** `docker compose down && docker compose up -d` gives a healthy three-service
+stack and a working prediction; `delay-api` runs as **uid 1000**, resolves `@champion` through
+`http://mlflow:5000`, and the container's prediction is **bitwise identical** to the venv's.
+Image **1.62 GB** from a **65-package** serving subset (the full stack is 110 packages / 1.9 GB of
+site-packages).
+
+**Three findings worth carrying forward:**
+- **D38** — the serving dependency set was *measured*, not assumed, and `pandera`, `sqlalchemy` and
+  `psycopg2` fell out. `DENYLIST` now lives in dependency-free `src/contract.py`, and `src.db` /
+  `src.etl` imports in `src/features/` are function-local. **Do not restore them to module scope.**
+- **D40** — MLflow 3 rejects `Host: mlflow:5000` with a 403 naming DNS rebinding.
+  `MLFLOW_SERVER_ALLOWED_HOSTS` fixes it and **replaces** the default allowlist, so the localhost
+  entries must stay in the list or host-side tooling breaks.
+- **A venv cannot tell you what an image needs.** `pyarrow` was missing from
+  `requirements-api.txt` because it reached the venv via *full* `mlflow`, which `mlflow-skinny`
+  drops. Only a from-scratch install distinguishes a direct dependency from an inherited one.
+
+**Still open, for your decision:** CatBoost is 269 MB of the image against LightGBM's 10 MB, while
+their PR-AUC differs by less than the 0.004 noise band (LightGBM is actually *higher* on CV:
+0.15349 vs 0.15209). Shipping LightGBM would cut ~259 MB for no measurable loss. Not changed.
+
+**Next: Phase 9 — Retraining lifecycle and promotion gate** (~3.5 h). **Read §18 A2 and A3 first.**
+- `src/evaluation/score_holdout.py` and `src/registry/promote.py` are the only modules allowed to
+  unlock the 2018-05 → 08 window; `AUTHORISED_UNLOCKERS` in `src/splits.py` already names them.
+- The gate compares **v2 (champion) against v3**, not v1: v1 is withdrawn (D33).
+- Set the Brier tolerance against **D20** — the evaluation window's base rate is 4.40% against the
+  calibration window's ~9.75%, so a calibrator fitted there will over-predict here. That is a
+  base-rate shift, not a defective calibrator, and the gate must not punish it as one.
+- PR-AUC on the holdout will be **much lower** than 0.216 for the same reason. Report **lift over
+  base rate**, or an honest number reads as a broken model.
+- Promotion is **not purely a registry operation**: if a challenger ships a different library the
+  API image must be rebuilt first (noted in `requirements-api.txt`).
 - `httpx2`: starlette's TestClient warns that using it with `httpx` is deprecated. A new dependency
   needs approval, so it is **not** installed; it will become an error when starlette removes the
   shim.

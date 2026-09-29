@@ -48,13 +48,17 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pandas as pd
-from sqlalchemy import text
-from sqlalchemy.engine import Connection
 
-from src.db import get_engine
-from src.etl.build_orders import analysis_window
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from sqlalchemy.engine import Connection
+
+# sqlalchemy, src.db and src.etl are imported INSIDE the functions that need them. Every one of
+# those functions is on the build path; none is reached when serving a prediction. At module scope
+# they dragged sqlalchemy, psycopg2 and pandera into the API image, because this module is imported
+# by the pyfunc wrapper (DECISIONS.md D38).
 
 logger = logging.getLogger(__name__)
 
@@ -351,6 +355,8 @@ def write_snapshots(conn: Connection, snapshots: dict[str, pd.DataFrame]) -> dic
         if spec.fallback_table:
             key_by_table[spec.fallback_table] = spec.fallback_key
 
+    from sqlalchemy import text
+
     written: dict[str, int] = {}
     for table, frame in snapshots.items():
         key = key_by_table[table]
@@ -393,6 +399,11 @@ def write_snapshots(conn: Connection, snapshots: dict[str, pd.DataFrame]) -> dic
 
 def build() -> dict[str, object]:
     """Read resolved orders, build every snapshot level, and write them, in one transaction."""
+    from sqlalchemy import text
+
+    from src.db import get_engine
+    from src.etl.build_orders import analysis_window
+
     start, end_exclusive = analysis_window()
     months = snapshot_months(pd.Timestamp(start), pd.Timestamp(end_exclusive))
     logger.info("Snapshot months: %d, %s .. %s", len(months), months[0].date(), months[-1].date())

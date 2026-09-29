@@ -5,8 +5,8 @@ that task. Source of truth for *what* to build is `PLAN.md`; this file only trac
 are*. Decisions and their reasons live in `DECISIONS.md`.
 
 - **Plan version:** v1 (2026-09-28) + amendments §18 · **Pre-flight completed:** 2026-09-28
-- **Current phase:** Phase 7 — FastAPI and the parity test · **✅ COMPLETE**
-- **Overall:** **8 / 12 phases** · 378 tests green, zero skips · Phase 6's output rebuilt after two real bugs (D33, D35)
+- **Current phase:** Phase 8 — Docker and Compose · **✅ COMPLETE**
+- **Overall:** **9 / 12 phases** · 400 tests green, zero skips · Phase 6's output rebuilt after two real bugs (D33, D35)
 - **Estimated remaining:** ~20 h of build work (PLAN §3 budget: 36-42 h)
 
 ---
@@ -101,7 +101,83 @@ what a registry is for, and superseding is the more honest artefact. Moving the 
 documented one-off — `_assign_alias` correctly *refused* to promote v2, because promotion is the
 gate's call; withdrawing a version built by broken code is a correction, not a promotion on merit.
 
-### Phase 7 — the API, and what it is measured at
+### Phase 8 — the container, and three things only a container could find
+
+**Complete.** `docker compose down && docker compose up -d` gives a healthy three-service stack and
+a working prediction. Verified in that order, and `-v` was never passed: both
+`delay-prediction-pgdata` and `realtime-fraud-detection_redis-data` were confirmed present before
+and after the teardown.
+
+- **Startup ordering demonstrated, not assumed:** the log shows `delay-mlflow Waiting` →
+  `delay-mlflow Healthy` → `delay-api Starting`. That is `condition: service_healthy` doing its job;
+  §13 names a bare `depends_on` as the mistake.
+- `delay-api` runs as **uid 1000 (appuser)**, resolves `@champion` through `http://mlflow:5000`, and
+  reports `catboost / 38 features / threshold 0.17925 / bundled snapshot 2018-03-01`.
+- **Image 1.62 GB** from a **65-package** serving subset, against the full stack's 110 packages and
+  1.9 GB of site-packages. Multi-stage: `build-essential` stays in the builder.
+- `Dockerfile.trainer` exists behind `profiles: ["training"]` and is **deliberately not built** —
+  PLAN.md §3 lists the trainer profile as the first thing to cut, and an unbuilt service behind a
+  profile costs nothing.
+
+**The container's prediction is bitwise identical to the venv's** (`0.0433996383363472`, difference
+exactly 0.0). That is a stronger claim than `tests/test_parity.py`, which compares two code paths in
+one interpreter; this compares two environments, one of which had three packages removed and
+`mlflow` swapped for `mlflow-skinny`. Pruning dependencies can move numerics without raising, and
+nothing else in the suite would have noticed. It is now a test.
+
+#### D38 — the serving dependency set was measured, and three libraries fell out
+
+`requirements-api.txt` had claimed since Phase 0 that pandera was "excluded on purpose". **The
+pyfunc could not load without it.** Loading the champion in a clean process and reading
+`sys.modules` showed why:
+
+- `construct_features` imported `DENYLIST` from `src/etl/schema.py`, whose module scope imports
+  `pandera` — and that line runs on **every served prediction**. A validation framework was being
+  installed to read a frozenset of ten strings. It now lives in dependency-free `src/contract.py`.
+- `src/features/build.py` and `history.py` imported `src.db` at module scope, putting SQLAlchemy and
+  psycopg2 in the image for a connection the API never opens.
+
+**110 packages → 65.** The 345 MB `nvidia` CUDA library D14 flagged disappears for free, because
+`xgboost` is not installed.
+
+#### D40 — two failures that only a container could surface
+
+1. **`403 Invalid Host header - possible DNS rebinding attack detected`.** MLflow 3 validates the
+   `Host` header, and its default allowlist is localhost plus private IPs — not Compose service
+   names. `MLFLOW_SERVER_ALLOWED_HOSTS` fixes it, and **replaces** the defaults rather than
+   extending them, so the localhost entries had to be repeated or every host-side script would have
+   broken instead. Both directions verified afterwards.
+2. **`ModuleNotFoundError: No module named 'pyarrow'`.** My own error: the closure measurement showed
+   pyarrow imported and I left it out, assuming pandas or mlflow would bring it. `pip show pyarrow`
+   says `Required-by: mlflow` — the **full** package that `mlflow-skinny` replaces — and pandas 3
+   requires only numpy and python-dateutil. **A venv cannot tell you what an image needs:** it shows
+   what is present, and with the training stack installed everything is present, so a direct
+   dependency is indistinguishable from an inherited one. Only a from-scratch install closes that
+   gap. Same shape as D35 — the measurement was right and its environment was what lied.
+
+#### Latency, measured three ways
+
+| | single p50 | batch-100 p50 | per record |
+|---|---:|---:|---:|
+| host uvicorn | 52.64 ms | 54.91 ms | 0.549 ms |
+| container via published port | 53.41 ms | 88.21 ms | 0.882 ms |
+| container from **inside** | 58.08 ms | 62.81 ms | 0.628 ms |
+
+Single-record latency is unchanged by containerization. Batch-100 looked 33 ms worse through the
+port, and the cause was measured rather than guessed: same `os.cpu_count()`, same unset
+`OMP_NUM_THREADS`, same `scipy-openblas`, so **not** D35's mechanism. Benchmarking from inside the
+container removes 25 of those 33 ms, placing the cost in **Docker's port-forwarding path for a
+~60 KB body** — about 0.25 ms per record of plumbing. Not a model or runtime regression.
+
+#### Still open, for the user's decision
+
+CatBoost is **269 MB** of the image; LightGBM is **10 MB**. Their PR-AUC differs by less than the
+0.004 band D35 established, and LightGBM is *higher* on cross-validation (0.15349 against 0.15209).
+Shipping LightGBM would cut ~259 MB for no measurable loss, and "indistinguishable on PR-AUC, chose
+the 10 MB one" is a better answer than a fourth decimal place. Not changed — it would mean re-running
+`decide` and `train`.
+
+### Phase 7 — the API, and what it is measured at### Phase 7 — the API, and what it is measured at
 
 **Complete except for the write-up.** `make serve` runs it on 8001; `make bench` measures it.
 
@@ -644,8 +720,8 @@ since the real dataset is 121 MB and CC BY-NC-SA and will never be in a workflow
 | 5 | Ensemble, calibration, threshold | 4 h | medium | ✅ **complete** · ship XGBoost (D31) · D29 resolved |
 | 6 | MLflow, pyfunc wrapper, registry | 4 h | medium | ✅ **complete** · v1 `@champion`, loads in a fresh process |
 | 7 | FastAPI and the parity test | 4 h | medium | ✅ **done** · parity green at 1e-6 · single p50 52.6 ms |
-| 8 | Docker and Compose | 3 h | medium | **next** · ⚠️ read §18 A5 first · `requirements-api.txt` now needs **catboost** (D35); validate `mlflow-skinny` |
-| 9 | Retraining lifecycle and promotion gate | 3.5 h | medium | ⚠️ read §18 A2 first; set the Brier tolerance against D20 |
+| 8 | Docker and Compose | 3 h | medium | ✅ **done** · 1.62 GB image, 65 packages · cold cycle verified |
+| 9 | Retraining lifecycle and promotion gate | 3.5 h | medium | **next** · ⚠️ read §18 A2, A3 · gate compares **v2 vs v3** (v1 withdrawn) · Brier tolerance against D20 |
 | 10 | Full CI/CD | 3 h | medium | CI gains pytest + Postgres service container |
 | 11 | Documentation and interview prep | 2.5 h | easy | |
 

@@ -1232,3 +1232,131 @@ artifact schema change for a message.
 
 **Consequence worth stating in the README:** `product_category` warns routinely and that is normal.
 A monitoring rule built on "any warning is drift" would fire on every batch.
+
+---
+
+## D38
+### The serving dependency set was measured, not assumed — and three libraries fell out
+**Date.** 2026-09-29 (Phase 8)
+
+**Decision.** `requirements-api.txt` is derived from a **measurement**: load the champion pyfunc in
+a clean process, score one record, and read `sys.modules`. Whatever appears is a serving dependency;
+whatever does not, is not. The measurement removed **pandera, sqlalchemy and psycopg2** from the
+image, and required two code changes to make that possible:
+
+1. **`src/contract.py`** — a dependency-free module holding `DENYLIST`. It was in
+   `src/etl/schema.py`, whose module scope imports `pandera`, and
+   `construct_features` imports it **on every served prediction**. So a data-validation framework
+   (and, through it, `pyyaml`) was being installed into a serving image to read a frozenset of ten
+   column names. `src/etl/schema.py` re-exports it, so every existing reader is unchanged.
+2. **Function-local imports** for `src.db` and `src.etl.build_orders` in `src/features/build.py`
+   and `src/features/history.py`. Every use of them is on the build path — `write_snapshots`,
+   `build`, `load_inputs`, `build_matrix` — and none is reached when serving. At module scope they
+   put SQLAlchemy and psycopg2 into the image for a database connection the API never opens, because
+   the as-of snapshots it needs are bundled inside the artifact, which is the entire point of §6.2.
+
+**Result.** The serving closure is `catboost` (the shipped model), `sklearn` + `scipy` (the isotonic
+calibrator), `joblib` (the artifact's format), `pandas`/`numpy`/`pyarrow`, and `mlflow`. Dependency
+count falls from **110 packages to 65**. `api.main` itself imports **no** `src` module and no heavy
+dependency at import time; everything arrives when the model loads.
+
+**Why measure rather than reason about it.** `requirements-api.txt` had claimed since Phase 0 that
+pandera was "excluded on purpose" — and the pyfunc could not have loaded without it. The file was
+not lying deliberately; it was written from what the API *looked like* it needed. An import graph is
+exactly the kind of thing that is cheap to measure and unreliable to reason about, because one
+module-level line three imports away decides it.
+
+**A note on what the measurement made visible.** The largest remaining serving dependency is
+**catboost at 269 MB**, against **lightgbm at 10 MB** — a 259 MB difference. Their PR-AUC differs by
+less than the 0.004 band D35 showed the three models occupy, and LightGBM actually scored *higher*
+on cross-validation (0.15349 against 0.15209). So the shipped-model choice has a real cost that
+PR-AUC cannot see, and D35's advice — choose between indistinguishable models on dependency weight
+rather than on a fourth decimal place — now has a number attached. Changing what ships is the user's
+call and is not done here.
+
+**The 305 MB CUDA library D14 flagged is gone for free.** `nvidia` (345 MB measured in the venv) is
+pulled by `xgboost`, which the serving subset does not install, so `xgboost-cpu` is moot for the API
+image. It would still matter for a trainer image.
+
+---
+
+## D39
+### The API does not depend on Postgres, and Compose says so
+**Date.** 2026-09-29 (Phase 8)
+
+**Decision.** The `api` service declares `depends_on: {mlflow: service_healthy}` only. §10.2 lists
+both Postgres and MLflow.
+
+**Why.** After D38's measurement the API provably opens no database connection: `sqlalchemy` and
+`psycopg2` are not installed in its image, so an attempt would fail at import. The as-of snapshots
+serving needs are bundled in the artifact. Declaring a dependency the service does not have would
+delay its start behind an unrelated healthcheck and, worse, misdescribe the dependency graph to the
+next person reading the file.
+
+`condition: service_healthy` is kept on the dependency that *is* real — §13 names bare `depends_on`
+racing Postgres as a common mistake, and the same race exists against MLflow: the API resolves
+`@champion` at startup, so it needs a tracking server that is actually answering, not merely a
+container that has been created.
+
+**The trainer service** is defined under `profiles: ["training"]` with its own
+`Dockerfile.trainer`, and depends on both — it genuinely needs the database. It is deliberately
+**not built**: its image carries optuna, shap, matplotlib and all three boosting libraries, PLAN.md
+§3 lists the trainer profile as the first thing to cut under time pressure, and an unbuilt service
+behind a profile costs nothing until someone asks for it.
+
+---
+
+## D40
+### MLflow 3 rejects container-to-container calls by service name, and a venv cannot tell you what an image needs
+**Date.** 2026-09-29 (Phase 8)
+
+Two failures on the first containerized start, both of which only a container could have found.
+
+**1. `403 Invalid Host header - possible DNS rebinding attack detected`.**
+MLflow 3 validates the HTTP `Host` header against an allowlist. The **default** list is localhost
+addresses plus private-IP patterns — and a container reaching the tracking server by its Compose
+service name sends `Host: mlflow:5000`, which matches nothing. Every registry call returned 403, so
+the API could not resolve `@champion`.
+
+Fixed by setting `MLFLOW_SERVER_ALLOWED_HOSTS` on the `mlflow` service. The trap inside the trap:
+the variable **replaces** the default list rather than extending it
+(`get_allowed_hosts_from_env() or get_default_allowed_hosts()`), so the localhost entries must be
+repeated or host-side tooling — `make registry`, `make train`, every script on the host — starts
+failing instead. Verified both directions afterwards: `curl 127.0.0.1:5000/health` still answers and
+`make registry` still reads the aliases.
+
+Worth knowing because the symptom names DNS rebinding, which sounds like an attack rather than a
+configuration mismatch, and because nothing in §10.2 anticipates it — the plan predates the
+protection being added.
+
+**2. `ModuleNotFoundError: No module named 'pyarrow'`.**
+The D38 closure measurement *did* show `pyarrow` imported, and I still left it out of
+`requirements-api.txt`, assuming pandas or mlflow would bring it. Neither does: `pip show pyarrow`
+reports `Required-by: mlflow` — the **full** package, which `mlflow-skinny` replaces — and pandas 3
+requires only `numpy` and `python-dateutil` despite using PyArrow-backed strings.
+
+**The general lesson, and the reason this is written down.** A dev venv cannot tell you what an image
+needs. It shows what is *present*, and in a venv holding the full training stack everything is
+present, so a direct dependency is indistinguishable from one dragged in by a package you are about
+to remove. Reading `sys.modules` correctly identified *what gets imported*; it could not identify
+*what installs it*. Only a from-scratch install in a clean environment closes that gap — which is
+what the container is, and why "it works in my venv" is not evidence about an image.
+
+This is the same shape as D35: the measurement was right and the environment it was taken in was the
+thing that lied.
+
+**Latency in the container, measured three ways** (Phase 8, appended to D40's context):
+
+| | single p50 | batch-100 p50 | per record |
+|---|---:|---:|---:|
+| host uvicorn, via HTTP | 52.64 ms | 54.91 ms | 0.549 ms |
+| container, via published port 8001 | 53.41 ms | 88.21 ms | 0.882 ms |
+| container, from **inside** (localhost:8000) | 58.08 ms | 62.81 ms | 0.628 ms |
+
+Single-record latency is unchanged by containerization. Batch-100 through the published port looked
+33 ms worse, and the cause was measured rather than guessed: the container reports the same
+`os.cpu_count()`, the same unset `OMP_NUM_THREADS`/`OPENBLAS_NUM_THREADS` and the same
+`scipy-openblas`, so it is **not** D35's thread-count mechanism. Benchmarking from inside the
+container removes 25 of those 33 ms, which places the cost in **Docker's port-forwarding path for a
+~60 KB request body** — about 0.25 ms per record of pure plumbing. Worth knowing before anyone reads
+the batch number as a model or runtime regression; it is neither.

@@ -6,7 +6,7 @@
     moment the customer completes checkout may enter the feature matrix.
 
     Strictly forbidden as features, because every one is populated after that moment
-    (PLAN.md §4.2, enforced by :data:`src.etl.schema.DENYLIST`):
+    (PLAN.md §4.2, enforced by :data:`src.contract.DENYLIST`):
 
         order_approved_at
         order_delivered_carrier_date
@@ -45,9 +45,10 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from sqlalchemy import text
 
-from src.db import get_engine
+# sqlalchemy and src.db are imported inside the functions that query Postgres. Both are build-path
+# only, and at module scope they put sqlalchemy and psycopg2 into the serving image for code the API
+# never runs (DECISIONS.md D38).
 
 logger = logging.getLogger(__name__)
 
@@ -309,7 +310,10 @@ def construct_features(
     Raises:
         ValueError: If an input column is missing, or if a §4.2 denylist column is present.
     """
-    from src.etl.schema import DENYLIST
+    # src.contract, not src.etl.schema: this line runs on every served prediction, and
+    # importing it from the schema module pulled pandera (and, through it, pyyaml) into the
+    # API image to read a frozenset of ten strings (DECISIONS.md D38).
+    from src.contract import DENYLIST
 
     missing = [column for column in REQUIRED_INPUT_COLUMNS if column not in orders.columns]
     if missing:
@@ -462,6 +466,8 @@ def window_slice(
 
 def load_inputs(conn) -> dict[str, object]:
     """Read orders, labels, snapshots and centroids from Postgres."""
+    from sqlalchemy import text
+
     from src.features.history import ENTITIES, GLOBAL_LEVEL
 
     tables = [spec.table for spec in ENTITIES]
@@ -496,6 +502,7 @@ def build_matrix(version: str = "v1") -> dict[str, object]:
     class of bug where a stored matrix drifts out of step with the artifact that supposedly
     produced it.
     """
+    from src.db import get_engine
     from src.features.artifact import PreprocessingArtifact
     from src.features.history import attach_history
     from src.splits import assert_temporal_ordering, version_splits
