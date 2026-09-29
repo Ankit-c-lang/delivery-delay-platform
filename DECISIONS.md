@@ -39,6 +39,7 @@ duplicated** — §18 is the authority, and two copies would drift apart.
 | [D29](#d29) | `purchase_month` cannot generalise forward — **dropped**, 38 features | 2026-09-29 |
 | [D30](#d30) | Ship the single model, not the blend (superseded by D31 on the model) | 2026-09-29 |
 | [D31](#d31) | After dropping `purchase_month`: ship XGBoost | 2026-09-29 |
+| [D32](#d32) | The pyfunc bundles everything; the holdout tag waits for the gate | 2026-09-29 |
 
 ---
 
@@ -934,3 +935,68 @@ evaluation set rather than trusting any single number here.
 **Carry into Phase 6:** the shipped model is XGBoost, so `requirements-api.txt` does **not** need
 `catboost` after all — but it does need `xgboost`, which is what pulls the 305 MB CUDA library
 D14 flagged. `xgboost-cpu` is now directly relevant to the Phase 8 image size.
+
+## D32
+### The pyfunc bundles everything, and the holdout tag waits for the gate
+**Decision.** `DelayPredictor` bundles the fitted `PreprocessingArtifact`, the model, the
+isotonic calibrator and the decision threshold into one logged object. Nothing is loaded
+separately at serving time. `@champion`/`@challenger` aliases, never stages. The first
+registered version becomes `@champion` uncontested; every later version becomes `@challenger`
+and waits for the Phase 9 gate.
+
+**Why bundling, rather than the API loading the artifact itself.** Because the alternative has
+a failure mode that no test catches and no error reports. If the model came from the registry
+and the artifact from somewhere else, serving correctness would depend on a pairing nothing
+enforces: retrain, register v2, forget to ship the new artifact, and v2 runs against v1's
+imputation medians, v1's frozen category levels and v1's as-of snapshots. Every prediction
+still returns a plausible probability. Nothing raises. The only symptom is that the model is
+quietly worse than its own metrics said — and those metrics were computed with the *correct*
+artifact, so they cannot reveal it.
+
+Bundling makes the pairing structural instead of procedural. A model version *is* its
+preprocessing: one URI, one atomic thing to promote, one thing to roll back. It also makes the
+§18 A6 parity claim expressible at all — "same raw record + same artifact -> same probability"
+is only testable if "the artifact" is a single identifiable object rather than a convention
+about which files were deployed together. The corollary is CLAUDE.md invariant 4: no
+preprocessing logic outside the wrapper.
+
+The threshold is bundled for the same reason. Shipping probabilities and leaving the operating
+point in a config file elsewhere is the same class of mistake in a smaller coat.
+
+**The §7 instruction that cannot be followed, and why that is right.** §7 asks each registered
+version to be tagged with its **holdout PR-AUC**. The 2018-05 → 08 window is locked at runtime
+and readable only by the promotion gate (§18 A3, D25), so a training run has no legitimate way
+to compute it. The tag is written as `pending: set by the promotion gate (§18 A3)` and Phase 9
+fills it in. Registering a model is not the same event as evaluating it, and the lock makes
+that ordering explicit rather than optional. A test asserts the tag stays pending.
+
+**Why the first version is champion but later ones are not.** §8 auto-promotes v1 because there
+is nothing to beat. Any later version becomes `@challenger`: promotion is the gate's decision,
+not a training run's, and encoding that here is what stops a retrain from quietly replacing
+production. Two tests cover both branches, including that the champion is *not* displaced.
+
+**Optuna trials are not MLflow runs.** §13 names that as a common mistake and it is: 100 trials
+across three studies would bury the five runs that mean something. Tuning is a separate step
+whose output is a JSON file; `train.py` loads it and logs the provenance — trials completed
+against requested, and seconds spent — as params on each child run.
+
+**Three MLflow behaviours worth knowing, each of which caused a real bug here.**
+
+1. **`search_model_versions` returns an empty `aliases` field.** Only `get_model_version` and
+   the registered-model object populate it. Reading aliases from the search result reported
+   "no alias" for a model that was in fact the champion. Aliases now come from
+   `get_registered_model(...).aliases`, inverted — one call rather than N. A test asserts the
+   trap still exists, so the workaround can be removed when MLflow fixes it.
+2. **`ModelVersion.version` is an int from a SQLite store and a str over HTTP.** A caller
+   comparing it behaves differently depending on the backend, so `_assign_alias` normalises its
+   return to `str`.
+3. **`mlflow.set_tracking_uri` writes into the process environment**, not just an in-memory
+   global. A test pointing MLflow at a throwaway SQLite store therefore redirected every later
+   test — which is how the fresh-process test came to skip itself with "tracking server not
+   reachable". An autouse fixture now snapshots and restores both the env var and MLflow's
+   global around every test in the module.
+
+**Rejected.** Logging the model with `mlflow.xgboost.log_model` and the artifact as a separate
+file (the skew bug above). Stages instead of aliases — removed in MLflow 3, so not available
+even if wanted (§18 A7). Re-tuning inside `train.py` (ten minutes per run, for a dictionary
+that already exists).

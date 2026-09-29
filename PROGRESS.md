@@ -5,16 +5,66 @@ that task. Source of truth for *what* to build is `PLAN.md`; this file only trac
 are*. Decisions and their reasons live in `DECISIONS.md`.
 
 - **Plan version:** v1 (2026-09-28) + amendments §18 · **Pre-flight completed:** 2026-09-28
-- **Current phase:** Phase 5 — Ensemble, calibration, threshold · **✅ COMPLETE**, and D29 is
-  now resolved: `purchase_month` dropped, **38 features**
-- **Overall:** **6 / 12 phases** · 304 tests green
+- **Current phase:** Phase 6 — MLflow, pyfunc wrapper, registry · **✅ COMPLETE**
+- **Overall:** **7 / 12 phases** · 326 tests green, zero skips
 - **Estimated remaining:** ~20 h of build work (PLAN §3 budget: 36-42 h)
 
 ---
 
 ## Currently working on
 
-**Nothing in flight. Phase 5 is complete and D29 is resolved.**
+**Nothing in flight. Phase 6 is complete — the spine is in place.**
+
+`delivery_delay_classifier` **v1 is registered with `@champion`**, and it loads in a **fresh
+Python process** by alias alone with the right signature — Phase 6's completion criterion, taken
+literally as a subprocess that imports nothing of this project. `make train` runs in ~22 s and
+produces:
+
+- a parent run `delivery_delay_v1_{timestamp}`
+- five nested children: `baseline_logreg`, `catboost`, `lightgbm`, `xgboost`, `ensemble`
+- the §7 param/metric/artifact set: split dates, feature families, snapshot month, git SHA (and
+  whether the tree was dirty), PR-AUC / ROC-AUC / Brier / recall@10% / threshold / expected cost,
+  PR and ROC and calibration curves, the confusion matrix, the SHAP plots, the ordered feature
+  list, the tuning provenance, and the preprocessing artifact as a separately downloadable file
+- a pyfunc bundling **artifact + model + calibrator + threshold**, with a signature and a
+  representative `input_example`
+
+**The round-trip test is the one that matters:** log, load back by URI in a clean context, and
+assert predictions match the in-memory object **to 1e-9**. That is the test that catches §13's
+"classic skew bug" — a model logged without its preprocessing loads fine, predicts fine, and is
+quietly wrong.
+
+### Two §7 instructions that could not be followed literally, and why that is right
+
+**The holdout PR-AUC tag.** §7 wants each version tagged with it. The 2018-05 → 08 window is
+locked to the promotion gate (§18 A3, D25), so a training run has no legitimate way to compute
+it. The tag reads `pending: set by the promotion gate (§18 A3)` and Phase 9 fills it in.
+Registering a model is not the same event as evaluating it. A test asserts the tag stays pending.
+
+**Which run registers the model.** §7 shows the model registered from the `ensemble` child. The
+blend lost (D31), so that child logs the blend experiment *and* registers whatever actually
+ships — XGBoost. The structure is kept; the honesty is too.
+
+### Four MLflow behaviours, each of which caused a real bug here
+
+1. **`search_model_versions` returns an empty `aliases` field.** `make registry` reported
+   `(no alias)` for a model that *was* the champion. Aliases now come from
+   `get_registered_model(...).aliases`, inverted. A test asserts the trap still exists so the
+   workaround can be removed when MLflow fixes it.
+2. **`ModelVersion.version` is an `int` from SQLite and a `str` over HTTP.** A caller comparing
+   it behaves differently by backend, so `_assign_alias` normalises its return to `str`.
+3. **`mlflow.set_tracking_uri` writes into the process environment**, not just an in-memory
+   global — so a test pointing at a throwaway SQLite store redirected every later test. An
+   autouse fixture now snapshots and restores both. Worth having before Phases 7-9 add more.
+4. **My own skip clause hid a real failure.** The fresh-process test skipped with "registry not
+   reachable" when the actual cause was a typo in the test script (`PyFuncModel.model_uri` does
+   not exist; it is `.metadata.signature`). Reachability is now checked *separately and first*,
+   so a genuine failure inside the subprocess is reported as a failure.
+
+That last one is the most useful lesson: a broad `except -> skip` turns every bug in a test into
+a green run.
+
+---
 
 ### `purchase_month` dropped — 38 features
 
@@ -478,8 +528,8 @@ since the real dataset is 121 MB and CC BY-NC-SA and will never be in a workflow
 | 3 | As-of aggregates and feature assembly | 5 h | **hardest** | ✅ **complete** · all 3 parts |
 | 4 | Baselines and single models | 4 h | medium | ✅ **complete** · LightGBM leads at 0.1528 |
 | 5 | Ensemble, calibration, threshold | 4 h | medium | ✅ **complete** · ship XGBoost (D31) · D29 resolved |
-| 6 | MLflow, pyfunc wrapper, registry | 4 h | medium | **next** · XGBoost ships, so no `catboost` in `requirements-api.txt`, but `xgboost` pulls the 305 MB CUDA lib (D14) |
-| 7 | FastAPI and the parity test | 4 h | medium | ⚠️ read §18 A3, A6 first |
+| 6 | MLflow, pyfunc wrapper, registry | 4 h | medium | ✅ **complete** · v1 `@champion`, loads in a fresh process |
+| 7 | FastAPI and the parity test | 4 h | medium | **next** · ⚠️ read §18 A3, A6 first · `RAW_INPUT_COLUMNS` is the request contract |
 | 8 | Docker and Compose | 3 h | medium | ⚠️ read §18 A5 first · validate `mlflow-skinny` **and** the 305 MB CUDA dependency (D14) |
 | 9 | Retraining lifecycle and promotion gate | 3.5 h | medium | ⚠️ read §18 A2 first; set the Brier tolerance against D20 |
 | 10 | Full CI/CD | 3 h | medium | CI gains pytest + Postgres service container |

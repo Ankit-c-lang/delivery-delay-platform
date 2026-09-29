@@ -57,4 +57,13 @@ filterwarnings = [
     # Fail on pytest's own removal warnings. These are always our mistake, never a
     # third-party one, and a silent one costs a broken suite on the next pytest major.
     "error::pytest.PytestRemovedIn10Warning",
+    # MLflow warns generically that integer signature columns cannot hold nulls. Verified not
+    # to apply here: every integer column in the signature is NOT NULL in
+    # features.orders_analytical, so a null is a contract violation and schema enforcement
+    # rejecting it is what CLAUDE.md asks for. Guarded by
+    # TestIntegerSchemaIsSafe::test_every_integer_signature_column_is_not_null_in_the_table,
+    # which fails if a nullable integer feature is ever added.
+    # The `.` matches the colon in "Hint:" — a literal colon would be read as the
+    # filterwarnings category separator and raise at collection time.
+    "ignore:Hint. Inferred schema contains integer column",
 ]

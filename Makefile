@@ -9,7 +9,7 @@ COMPOSE := docker compose -f docker-compose.yml
 
 .DEFAULT_GOAL := help
 .PHONY: help lint format test test-unit up down stop ps logs psql health check-data load-raw \
-        build-orders etl snapshots features baselines tune decide
+        build-orders etl snapshots features baselines tune decide train registry
 
 help: ## List available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -86,3 +86,11 @@ tune: ## Baselines + Optuna for all 3 GBDTs. Budget is 55 min worst case (PLAN.m
 
 decide: ## Blend, calibrate, sweep the threshold, SHAP, and write the ship decision
 	$(PY) -m src.training.ensemble
+
+# --- Phase 6 -------------------------------------------------------------------
+
+train: ## Full versioned MLflow run: nested children, pyfunc, registry. V=v1 by default.
+	$(PY) -m src.training.train --version $(or $(V),v1)
+
+registry: ## Show the registered versions and their aliases
+	$(PY) -m src.training.train --show-registry

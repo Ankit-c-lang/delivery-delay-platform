@@ -47,7 +47,7 @@ explicit approval.
 `make help` lists what actually exists. Each phase adds its own targets; a target whose
 module does not exist yet is not written (DECISIONS.md D15).
 
-**Exist now (Phases 0-5):**
+**Exist now (Phases 0-6):**
 - `make lint | format | test | test-unit` — `test-unit` skips anything needing Postgres or
   the dataset, which is what CI will run from Phase 10
 - `make up | down | stop | ps | logs | health | psql`
@@ -56,9 +56,11 @@ module does not exist yet is not written (DECISIONS.md D15).
 - `make snapshots` (as-of snapshots) · `make features` (fit the artifact, build the matrix)
 - `make baselines` (fast, no Optuna) · `make tune` (baselines + all 3 GBDTs, ~10 min measured)
 - `make decide` (blend, calibrate, threshold, SHAP, feature audit, ship decision — ~25 s)
+- `make train V=v1` (full MLflow run: nested children, pyfunc, registry — ~22 s) ·
+  `make registry` (versions and aliases)
 
 **Arrive with their phase:**
-- `register` (6) · `promote` (9) · `make serve | bench` (7-8)
+- `promote` (9) · `make serve | bench` (7-8)
 - `make bootstrap` (8) — the ordered first-run sequence (PLAN §18 A5). **Required before
   `docker compose up` on a clean machine**, because the API resolves `@champion` at startup
   and the registry starts empty.
@@ -146,7 +148,12 @@ splitting, Streamlit. If a change isn't in `PLAN.md`, ask before writing it.
 - Commit or push only when asked.
 
 ## Current phase
-**Phases 0-5 COMPLETE.** 304 tests pass. **Ship XGBoost alone** (D31). The blend is a genuine
+**Phases 0-6 COMPLETE.** 326 tests pass. `delivery_delay_classifier` **v1 is registered with
+`@champion`** and loads in a fresh Python process by alias alone. `make train` produces a parent
+run plus five nested children and a pyfunc that bundles artifact + model + calibrator +
+threshold (D32).
+
+Phase 5 results, unchanged: **Ship XGBoost alone** (D31). The blend is a genuine
 0.77/0.23 CatBoost/XGBoost mix and is still **worse** on PR-AUC (delta −0.00156), because weights
 are fitted on log-loss while PR-AUC measures ranking. Calibration improves held-out Brier
 0.0853 -> 0.0841. Threshold **0.21** under an assumed 5:1 FN:FP ratio: 36.3% recall at a 13.7%
@@ -163,11 +170,17 @@ in only one year, so a month effect is confounded with that year's operations. D
 cross-validated PR-AUC for all three GBDTs. The surviving timing features recur often enough to be
 estimable: 87 weeks for day-of-week against 1.67 years for month-of-year.
 
-**Next: Phase 6 — MLflow, pyfunc wrapper, registry** (~4 h), once D29 is settled. MLflow 3
-removed stages, so `@champion`/`@challenger` aliases are the only mechanism, and `log_model`
-takes `name=` where 2.x took `artifact_path=` (§18 A7). **XGBoost ships, so
-`requirements-api.txt` does not need `catboost` — but `xgboost` is what pulls the 305 MB CUDA
-library D14 flagged, which makes `xgboost-cpu` directly relevant to Phase 8.**
+**Next: Phase 7 — FastAPI and the parity test** (~4 h). **Read §18 A3 and A6 first.**
+- The parity test uses `tests/fixtures/`, **never** the 2018-05 → 08 window (§18 A3). That
+  window raises unless unlocked by the gate, so the guard is enforced, not advisory.
+- Parity is scoped to **one fixed artifact**: same raw record + same artifact -> same
+  probability within 1e-6. Snapshot selection is outside its scope (§18 A6).
+- The API layer contains **no preprocessing** (invariant 4). It resolves
+  `models:/delivery_delay_classifier@champion`, passes raw order records to the pyfunc, and
+  returns what comes back. `src/registry/pyfunc_wrapper.py::RAW_INPUT_COLUMNS` is the request
+  contract — 25 columns, and history columns are **rejected** if a caller supplies them.
+- XGBoost ships, so `requirements-api.txt` needs no `catboost` — but `xgboost` pulls the 305 MB
+  CUDA library D14 flagged, which makes `xgboost-cpu` directly relevant to Phase 8.
 
 The `realtime-fraud-detection` stack is currently **stopped** to free RAM for tuning. Restart it
 with `docker start realtime-fraud-detection-redis-1 realtime-fraud-detection-scorer-1
