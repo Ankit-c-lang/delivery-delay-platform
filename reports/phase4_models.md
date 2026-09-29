@@ -12,9 +12,9 @@ Training rows: **36,174** · base rate **0.0585** · `TimeSeriesSplit(n_splits=4
 |---|---:|---:|---:|---:|
 | _majority_class_ | 0.06559 | 1.12x | - | - |
 | _logistic_regression_ | 0.13567 | 2.32x | - | - |
-| **lightgbm** | **0.15278** | 2.61x | 40/40 | 386s |
-| **catboost** | **0.14893** | 2.55x | 20/20 | 369s |
-| **xgboost** | **0.14675** | 2.51x | 40/40 | 107s |
+| **lightgbm** | **0.15278** | 2.61x | 40/40 | 119s |
+| **catboost** | **0.14893** | 2.55x | 20/20 | 363s |
+| **xgboost** | **0.14675** | 2.51x | 40/40 | 110s |
 
 ## Read the per-fold scores against the per-fold base rate
 

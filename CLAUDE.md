@@ -47,7 +47,7 @@ explicit approval.
 `make help` lists what actually exists. Each phase adds its own targets; a target whose
 module does not exist yet is not written (DECISIONS.md D15).
 
-**Exist now (Phases 0-2):**
+**Exist now (Phases 0-5):**
 - `make lint | format | test | test-unit` — `test-unit` skips anything needing Postgres or
   the dataset, which is what CI will run from Phase 10
 - `make up | down | stop | ps | logs | health | psql`
@@ -55,6 +55,7 @@ module does not exist yet is not written (DECISIONS.md D15).
 - `make check-data | load-raw | build-orders` and `make etl` for all three in order
 - `make snapshots` (as-of snapshots) · `make features` (fit the artifact, build the matrix)
 - `make baselines` (fast, no Optuna) · `make tune` (baselines + all 3 GBDTs, ~10 min measured)
+- `make decide` (blend, calibrate, threshold, SHAP, feature audit, ship decision — ~25 s)
 
 **Arrive with their phase:**
 - `register` (6) · `promote` (9) · `make serve | bench` (7-8)
@@ -145,21 +146,26 @@ splitting, Streamlit. If a change isn't in `PLAN.md`, ask before writing it.
 - Commit or push only when asked.
 
 ## Current phase
-**Phases 0-4 COMPLETE.** 267 tests pass. LightGBM leads at CV PR-AUC **0.1528** (2.61x the
-base rate), beating logistic regression 0.1357 and the majority-class floor 0.0656.
+**Phases 0-5 COMPLETE.** 302 tests pass. **Ship CatBoost alone** — the blend collapsed onto it
+with weight 1.0, so the delta is exactly +0.00000 against a 0.005 bar (D30). Calibration improves
+held-out Brier 0.0858 -> 0.0838. Threshold **0.17** under an assumed 5:1 FN:FP ratio: 48.1% recall
+at a 21.6% flag rate.
+
 `raw` holds 9 tables / 1,550,922 rows; `features.orders_analytical` holds 96,203 rows at a 6.79%
 `is_late` rate; six snapshot tables hold 34,427 rows; the **39-feature** matrix and a fitted
 `PreprocessingArtifact` build in ~4 s via `make features`; `src/splits.py` owns every date
 boundary and locks the promotion evaluation window.
 
-**Next: Phase 5 — Ensemble, calibration, threshold** (~4 h). Three findings govern it:
-- **D27:** the three GBDTs land within 0.006 PR-AUC of each other, so §6.5's warning applies in
-  advance — measure the blend delta and be ready to ship the single model with the ensemble kept
-  as a logged experiment.
-- **D20:** both calibration windows sit at 2.2-2.7x the evaluation window's base rate, so
-  isotonic calibration will over-predict there. That is a base-rate shift, not a bug.
-- **D26:** the model is **weakest during the November demand spike** (lowest lift of any fold).
-  Report that rather than averaging it away.
+**⚠️ ONE DECISION IS OPEN BEFORE PHASE 6 (D29).** SHAP ranked `purchase_month` the #1 feature,
+but its fit-window values {5..12} and calibration values {1,2} **do not overlap at all** — it
+cannot have been learned. Dropping it improves Brier for all three models and PR-AUC for two of
+three (XGBoost by +0.031). Recommendation: drop it, leaving 38 features, which §5 explicitly
+sanctions. Not done unilaterally because it changes the artifact schema hash and invalidates
+Phase 4's tuned parameters. **Settle this before Phase 6 registers a model.**
+
+**Next: Phase 6 — MLflow, pyfunc wrapper, registry** (~4 h), once D29 is settled. MLflow 3
+removed stages, so `@champion`/`@challenger` aliases are the only mechanism, and `log_model`
+takes `name=` where 2.x took `artifact_path=` (§18 A7).
 
 The `realtime-fraud-detection` stack is currently **stopped** to free RAM for tuning. Restart it
 with `docker start realtime-fraud-detection-redis-1 realtime-fraud-detection-scorer-1

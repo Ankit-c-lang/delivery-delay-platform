@@ -9,7 +9,7 @@ COMPOSE := docker compose -f docker-compose.yml
 
 .DEFAULT_GOAL := help
 .PHONY: help lint format test test-unit up down stop ps logs psql health check-data load-raw \
-        build-orders etl snapshots features baselines tune
+        build-orders etl snapshots features baselines tune decide
 
 help: ## List available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -81,3 +81,8 @@ baselines: ## Baselines only, no tuning (fast: no Optuna)
 
 tune: ## Baselines + Optuna for all 3 GBDTs. Budget is 55 min worst case (PLAN.md 6.4).
 	$(PY) -m src.training.tune
+
+# --- Phase 5 -------------------------------------------------------------------
+
+decide: ## Blend, calibrate, sweep the threshold, SHAP, and write the ship decision
+	$(PY) -m src.training.ensemble

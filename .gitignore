@@ -55,6 +55,10 @@ reports/*
 !reports/as_of_snapshots.md
 !reports/feature_matrix.md
 !reports/phase4_models.md
+!reports/model_selection.md
+# SHAP plots are small PNGs and are the evidence for the feature audit.
+!reports/shap/
+!reports/shap/*.png
 *.png
 !docs/**/*.png
 

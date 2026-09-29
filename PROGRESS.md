@@ -5,87 +5,94 @@ that task. Source of truth for *what* to build is `PLAN.md`; this file only trac
 are*. Decisions and their reasons live in `DECISIONS.md`.
 
 - **Plan version:** v1 (2026-09-28) + amendments §18 · **Pre-flight completed:** 2026-09-28
-- **Current phase:** Phase 4 — Baselines and single models · **✅ COMPLETE**
-- **Overall:** **5 / 12 phases** · 267 tests green
-- **Estimated remaining:** ~24 h of build work (PLAN §3 budget: 36-42 h)
+- **Current phase:** Phase 5 — Ensemble, calibration, threshold · **✅ COMPLETE**, with one
+  decision left open (D29, `purchase_month`)
+- **Overall:** **6 / 12 phases** · 302 tests green
+- **Estimated remaining:** ~20 h of build work (PLAN §3 budget: 36-42 h)
 
 ---
 
 ## Currently working on
 
-**Nothing in flight. Phase 4 is complete.**
+**Nothing in flight. Phase 5 is complete** — but it surfaced one thing that needs your decision
+before Phase 6.
 
-All three GBDTs beat both baselines, which is the phase's completion criterion, and **no study
-timed out** — the whole run took **~10 minutes against a 55-minute worst case**, so §6.4's
-budget was conservative for this dataset size.
+### ⚠️ The open decision: `purchase_month` cannot generalise forward (D29)
 
-| Model | CV PR-AUC | Lift | Trials | Wall clock | Budget |
+SHAP ranked `purchase_month` the **#1 feature** at mean |SHAP| 0.198, a third above the second.
+It should not be there:
+
+- fit-window values: **{5, 6, 7, 8, 9, 10, 11, 12}**
+- calibration-window values: **{1, 2}**
+- **overlap: none**
+
+The top feature takes values at scoring time it never saw in training. A tree cannot have learned
+month 1 — it routes an unseen value to whichever branch the last split left open, so any apparent
+benefit is geometry, not seasonality.
+
+A leave-one-out refit (real refits, not permutation importance) settles it:
+
+| Model | PR-AUC with | without | delta | Brier with | without |
 |---|---:|---:|---:|---:|---:|
-| _majority class_ | 0.0656 | 1.12x | — | — | — |
-| _logistic regression_ | 0.1357 | 2.32x | — | — | — |
-| **LightGBM** | **0.1528** | **2.61x** | 40/40 | **105 s** | 900 s |
-| CatBoost | 0.1489 | 2.55x | 20/20 | 373 s | 1500 s |
-| XGBoost | 0.1468 | 2.51x | 40/40 | 107 s | 900 s |
+| CatBoost | 0.21498 | 0.20927 | **−0.00571** | 0.08528 | **0.08374** |
+| LightGBM | 0.18755 | 0.20251 | **+0.01496** | 0.08910 | **0.08637** |
+| XGBoost | 0.18443 | 0.21498 | **+0.03055** | 0.08916 | **0.08528** |
 
-CatBoost is **3.5x slower than LightGBM for a slightly worse score**, exactly as §6.4 warned.
+Dropping it improves **Brier for all three** and PR-AUC for two of three — XGBoost by +0.031,
+twice Phase 4's entire GBDT-over-logistic margin. Only CatBoost prefers keeping it, and CatBoost
+is the model whose handling of the unseen values happens to land favourably. An effect whose
+*sign* flips between libraries is an accident.
 
-**The margins are modest, and that is consistent with D22.** The best GBDT beats logistic
-regression by +0.017 PR-AUC — a 12.6% relative gain — and the three GBDTs land within 0.006 of
-each other. Both follow from the history features being weak: there is limited non-linear
-structure to find beyond what a linear model already extracts from `promised_days`.
+**Recommendation: drop it, leaving 38 features** — §5 explicitly sanctions this ("drop 1-3 dead
+or redundant features... if it lands at 37, write 37"). The alternative is cyclical encoding
+(`sin`/`cos` of month), which puts month 1 next to month 12 and so removes the extrapolation
+rather than the seasonality.
 
-**`scale_pos_weight` tested, not assumed (§6.4).** At the implied ratio of 16.1, LightGBM scored
-**0.1456 against 0.1528 unweighted — worse by 0.0071**. §6.4 predicted precisely that:
-reweighting moves the probabilities without improving the ranking, and PR-AUC measures the
-ranking. No resampling anywhere.
+**Not done unilaterally** because it changes `FEATURE_NAMES` 39 -> 38 and therefore the artifact's
+schema hash, invalidates Phase 4's tuned parameters and report, needs `make tune` and
+`make decide` re-run (~12 min), and plausibly changes which model leads. Settle it before Phase 6
+puts a model behind an `@champion` alias.
 
-### The finding that needed digging for: per-fold PR-AUC mostly tracks the base rate
+### Phase 5 results
 
-LightGBM's folds scored 0.055, 0.105, 0.147, **0.304** — a 5.5x spread that looks like the model
-improving dramatically. It is mostly not:
+**Ship CatBoost alone.** The blend collapsed onto it — the log-loss optimum is a corner solution
+with weight **1.0000** on CatBoost and 0.0000 on the other two, so the blend *is* CatBoost and the
+delta is exactly **+0.00000** against a 0.005 bar. §13 said "if the gain is under 0.005 PR-AUC,
+say plainly that the single model should ship"; here the gain is not small, it is nil.
 
-| Fold | Validation window | Base rate | PR-AUC | Lift |
-|---|---|---:|---:|---:|
-| 1 | 2017-07-06 → 08-30 | 2.82% | 0.0547 | 1.94x |
-| 2 | 2017-08-30 → 10-19 | 4.17% | 0.1052 | 2.52x |
-| 3 | 2017-10-19 → 11-26 | 9.59% | 0.1471 | **1.53x** |
-| 4 | 2017-11-26 → 12-31 | 9.65% | 0.3040 | 3.15x |
+| | PR-AUC | Blend weight |
+|---|---:|---:|
+| **CatBoost** | **0.22455** | **1.0000** |
+| LightGBM | 0.21107 | 0.0000 |
+| XGBoost | 0.20321 | 0.0000 |
+| blend | 0.22455 | — |
 
-**Correlation between fold base rate and fold PR-AUC: +0.80.** PR-AUC is bounded below by the
-base rate, so a high-late-rate fold scores higher for free — the same D20 non-stationarity, now
-inside CV.
+**The winner changed between phases.** Phase 4 ranked LightGBM first on CV over the *fit* window
+(0.1528 vs CatBoost 0.1489); on the *calibration* window CatBoost leads. Selection is unstable at
+this margin — consistent with D26 — which is a reason to treat Phase 9's promotion gate as the
+real arbiter rather than either number.
 
-Two consequences:
-1. **The model is weakest exactly when it matters most.** Fold 3 is November 2017, the Black
-   Friday spike, with the highest base rate and the **lowest lift (1.53x)**. Delivery performance
-   degrades during the peak in ways these 39 features do not capture, so the model is least
-   useful in the period operations would most want it.
-2. **A mean over unequal-base-rate folds is not a neutral average** — it is dominated by the
-   high-rate folds, so tuning prefers hyperparameters that work *late* in the window. Arguably
-   the right bias for forward deployment, but a choice rather than an accident.
+**Calibration worked, measured out-of-sample:** held-out Brier **0.085847 -> 0.083776**. The
+in-sample figure (0.084706 -> 0.082229) is printed beside it only to show the difference between
+the two.
 
-Both numbers are now in `reports/phase4_models.md`. See `DECISIONS.md` D26 and D27.
+**Threshold: 0.17** under an assumed 5:1 FN:FP cost ratio — 48.1% recall at a 21.6% flag rate,
+21.5% precision. The ratio is a premise, not a measurement (§4.7), and the sweep runs on a window
+whose base rate is about twice the evaluation window's, so it is lower than a deployment-era
+choice would be.
 
-### Three defects found and fixed while building
+**Business impact:** on-time orders average **4.291** of 5, late orders **2.272** — a gap of
+**2.019 review-score points**, with 100% review coverage. Reviews are analysis-only;
+`review_impact()` asserts no review column reached the feature matrix before returning a number.
 
-- **A `FutureWarning` I introduced.** `LogisticRegression(n_jobs=1)` has had no effect on lbfgs
-  since scikit-learn 1.8 and is removed in 1.10. Dropped.
-- **LightGBM 4.7 deprecates `eval_set`** in favour of `eval_X`/`eval_y`. Checked the actual
-  signature rather than guessing, and switched. The smoke tests now pass with
-  `-W error::FutureWarning`.
-- **Ruff rejected `X` as an argument name** (N803). Rather than rename to something worse, the
-  exception is scoped to `src/training/*`, `src/evaluation/*` and `tests/*` with the reason
-  written in `pyproject.toml`: `X, y` is the convention every ML reader expects.
+### The design collision Phase 5 forced
 
-### A note on the install
-
-`requirements.txt` took ~17 minutes, which looked like a hang. It was not: downloads had
-finished and pip was unpacking — the venv grew 923 MB → 1342 MB in 20 seconds while the network
-sat at 11 KB/s. Worth knowing before killing it next time. Final venv is **1.9 GB**; 42 GB free.
-
-**The `realtime-fraud-detection` stack is currently stopped** to free RAM. Restart with
-`docker start realtime-fraud-detection-redis-1 realtime-fraud-detection-scorer-1
-realtime-fraud-detection-graph-refresh-1`. Its image and volume are untouched.
+§13 lists "calibrating on data used to fit the blend" as a common mistake while asking for both
+the blend weights *and* the calibrator to be fitted on validation. Resolved by splitting the
+calibration window — and the split is **interleaved**, not temporal, because a temporal split
+leaves halves at **5.74% and 13.77%** positives (D20 reappearing inside two months) while
+interleaving keeps both at ~9.75%. See `DECISIONS.md` D28, including why this does not violate
+invariant 5.
 
 ---
 
@@ -463,8 +470,8 @@ since the real dataset is 121 MB and CC BY-NC-SA and will never be in a workflow
 | 2 | Transform, validate, analytical table | 4 h | medium | ✅ **complete** · 80 tests |
 | 3 | As-of aggregates and feature assembly | 5 h | **hardest** | ✅ **complete** · all 3 parts |
 | 4 | Baselines and single models | 4 h | medium | ✅ **complete** · LightGBM leads at 0.1528 |
-| 5 | Ensemble, calibration, threshold | 4 h | medium | **next** · ⚠️ D20 base-rate shift, D26 fold lift, D27 blend may not pay · fixes whether CatBoost must re-enter `requirements-api.txt` (D14) |
-| 6 | MLflow, pyfunc wrapper, registry | 4 h | medium | |
+| 5 | Ensemble, calibration, threshold | 4 h | medium | ✅ **complete** · ship CatBoost alone (D30) · ⚠️ D29 open |
+| 6 | MLflow, pyfunc wrapper, registry | 4 h | medium | **next** · settle D29 first · CatBoost ships, so `requirements-api.txt` **needs catboost** (D14) |
 | 7 | FastAPI and the parity test | 4 h | medium | ⚠️ read §18 A3, A6 first |
 | 8 | Docker and Compose | 3 h | medium | ⚠️ read §18 A5 first · validate `mlflow-skinny` **and** the 305 MB CUDA dependency (D14) |
 | 9 | Retraining lifecycle and promotion gate | 3.5 h | medium | ⚠️ read §18 A2 first; set the Brier tolerance against D20 |

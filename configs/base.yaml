@@ -39,6 +39,20 @@ population_filter:
   order_status: delivered
   require_delivered_date: true
 
+decision:
+  # The cost ratio is an ASSUMPTION, never a measurement (PLAN.md §4.7). Report it as one:
+  # "under a 5:1 FN:FP cost assumption, the optimal threshold is X". A false negative is a
+  # late delivery (support contact, review damage, churn risk); a false positive is a
+  # proactive notification or an expedite.
+  fn_fp_cost_ratio: 5.0
+  # §13 Phase 5: "If the gain is under 0.005 PR-AUC, say plainly that the single model should
+  # ship." Encoded so the decision is a threshold, not a mood.
+  min_ensemble_gain_pr_auc: 0.005
+  # How the calibration window is divided between fitting blend weights and fitting the
+  # calibrator. "interleaved" keeps both halves at the window's base rate; "temporal" splits
+  # by date but leaves halves at 5.74% and 13.77% (DECISIONS.md D28).
+  calibration_split: interleaved
+
 metrics:
   # PR-AUC leads: with ~7% positives, ROC-AUC is flattering (PLAN.md §4.6).
   primary: average_precision

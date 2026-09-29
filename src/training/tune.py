@@ -127,7 +127,7 @@ def _categorical_columns(X: pd.DataFrame) -> list[str]:
     return [c for c in CATEGORICAL_FEATURES if c in X.columns]
 
 
-def _fit_predict(
+def fit_model(
     model_name: str,
     params: dict[str, Any],
     fixed: dict[str, Any],
@@ -135,8 +135,8 @@ def _fit_predict(
     y_train: np.ndarray,
     X_valid: pd.DataFrame,
     y_valid: np.ndarray,
-) -> np.ndarray:
-    """Fit one model on one fold and return validation probabilities.
+) -> Any:
+    """Fit one model with early stopping against ``X_valid`` and return the fitted estimator.
 
     Each library gets its native categorical handling rather than one-hot encoding (§6.1):
     LightGBM reads pandas ``category`` dtype directly, XGBoost needs
@@ -161,14 +161,14 @@ def _fit_predict(
             eval_metric="average_precision",
             callbacks=[early_stopping(rounds, verbose=False), log_evaluation(0)],
         )
-        return model.predict_proba(X_valid)[:, 1]
+        return model
 
     if model_name == "xgboost":
         from xgboost import XGBClassifier
 
         model = XGBClassifier(**settings)
         model.fit(X_train, y_train, eval_set=[(X_valid, y_valid)], verbose=False)
-        return model.predict_proba(X_valid)[:, 1]
+        return model
 
     if model_name == "catboost":
         from catboost import CatBoostClassifier
@@ -181,9 +181,73 @@ def _fit_predict(
             valid[column] = valid[column].astype(str)
         model = CatBoostClassifier(**settings, cat_features=categorical)
         model.fit(train, y_train, eval_set=(valid, y_valid), use_best_model=True)
-        return model.predict_proba(valid)[:, 1]
+        return model
 
     raise ValueError(f"unsupported model {model_name!r}; expected one of {SUPPORTED}")
+
+
+def predict_positive(model_name: str, model: Any, X: pd.DataFrame) -> np.ndarray:
+    """Positive-class probabilities from a fitted model.
+
+    CatBoost was trained with its categoricals as strings, so it must be predicted with them
+    as strings too — feeding it ``category`` dtype at predict time raises.
+    """
+    frame = X
+    if model_name == "catboost":
+        frame = X.copy()
+        for column in _categorical_columns(X):
+            frame[column] = frame[column].astype(str)
+    return model.predict_proba(frame)[:, 1]
+
+
+def _fit_predict(
+    model_name: str,
+    params: dict[str, Any],
+    fixed: dict[str, Any],
+    X_train: pd.DataFrame,
+    y_train: np.ndarray,
+    X_valid: pd.DataFrame,
+    y_valid: np.ndarray,
+) -> np.ndarray:
+    """Fit on one fold and return validation probabilities."""
+    model = fit_model(model_name, params, fixed, X_train, y_train, X_valid, y_valid)
+    return predict_positive(model_name, model, X_valid)
+
+
+def fit_final_model(
+    model_name: str,
+    params: dict[str, Any],
+    fixed: dict[str, Any],
+    X: pd.DataFrame,
+    y: np.ndarray,
+    early_stopping_tail: float = 0.15,
+) -> Any:
+    """Fit on the whole fit window, holding back an internal tail for early stopping.
+
+    Args:
+        model_name: One of :data:`SUPPORTED`.
+        params: Tuned hyperparameters.
+        fixed: Fixed settings from ``configs/models.yaml``.
+        X: Fit-window features, **time-sorted**.
+        y: Labels aligned to ``X``.
+        early_stopping_tail: Fraction of the end of the window reserved for early stopping.
+
+    Returns:
+        The fitted estimator.
+
+    **Why an internal tail rather than the calibration window.** Early stopping needs a
+    validation set, and the obvious candidate — the calibration window — is exactly the data
+    Phase 5 fits its blend weights on. Using it here would let every model peek at the rows
+    that decide their blend weights, which is the §6.5 mistake in a different coat. The last
+    15% of the fit window is used instead: still in-sample for the phase, chronologically last
+    so it mirrors the direction of deployment, and never touching the calibration rows.
+    """
+    split = int(len(X) * (1.0 - early_stopping_tail))
+    if split < 1 or split >= len(X):
+        raise ValueError(f"early_stopping_tail {early_stopping_tail} leaves no usable split")
+    return fit_model(
+        model_name, params, fixed, X.iloc[:split], y[:split], X.iloc[split:], y[split:]
+    )
 
 
 def cross_validate(
@@ -305,6 +369,9 @@ def tune(
 # ==================================================================================
 
 REPORT_PATH = Path("reports/phase4_models.md")
+#: Tuned hyperparameters, persisted so Phase 5 does not have to re-tune to blend and Phase 6
+#: can log them to MLflow. Gitignored with the rest of artifacts/ — regenerable by `make tune`.
+TUNED_PARAMS_PATH = Path("artifacts/tuned_params.json")
 
 
 def cross_validate_baselines(
@@ -484,6 +551,56 @@ def write_report(
     logger.info("Report written to %s", path)
 
 
+def save_tuned_params(
+    results: list[TuningResult], version: str, path: Path = TUNED_PARAMS_PATH
+) -> Path:
+    """Persist each study's best parameters and what the study actually achieved.
+
+    Phase 5 needs these to refit the models for blending, and Phase 6 logs them to MLflow.
+    Without this they live only in a report's prose, and Phase 5 would have to re-run a
+    ten-minute tuning job to recover a dictionary.
+    """
+    import json
+
+    payload = {
+        "version": version,
+        "cv_metric": "pr_auc",
+        "models": {
+            result.model: {
+                "best_params": result.best_params,
+                "cv_pr_auc": result.best_score,
+                "fold_scores": result.fold_scores,
+                "trials_completed": result.trials_completed,
+                "trials_requested": result.trials_requested,
+                "seconds": round(result.seconds, 1),
+            }
+            for result in results
+        },
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    logger.info("Tuned parameters written to %s", path)
+    return path
+
+
+def load_tuned_params(path: Path = TUNED_PARAMS_PATH) -> dict[str, Any]:
+    """Read the persisted tuning output.
+
+    Raises:
+        FileNotFoundError: With an actionable message. A missing file means `make tune` has
+            not been run, not that something is broken.
+    """
+    import json
+
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{path} not found. Run `make tune` first: Phase 5 needs Phase 4's tuned "
+            "hyperparameters to refit the models for blending."
+        )
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point: baselines and all three models on the fit window."""
     import argparse
@@ -535,6 +652,9 @@ def main(argv: list[str] | None = None) -> int:
         if lgb is not None:
             imbalance = scale_pos_weight_experiment(X, y, lgb.best_params, config)
             logger.info("scale_pos_weight experiment: PR-AUC %.5f", imbalance["pr_auc"])
+
+    if results:
+        save_tuned_params(results, args.version)
 
     if baselines and results:
         folds = fold_diagnostics(y, config["cv"]["n_splits"])

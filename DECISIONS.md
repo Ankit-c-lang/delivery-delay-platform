@@ -35,6 +35,9 @@ duplicated** — §18 is the authority, and two copies would drift apart.
 | [D25](#d25) | The promotion evaluation window is locked at runtime, not by convention | 2026-09-28 |
 | [D26](#d26) | Per-fold PR-AUC tracks the base rate, so lift is the comparable number | 2026-09-28 |
 | [D27](#d27) | Ship LightGBM as the lead model; `scale_pos_weight` made it worse | 2026-09-28 |
+| [D28](#d28) | Split the calibration window interleaved, not temporally | 2026-09-29 |
+| [D29](#d29) | `purchase_month` cannot generalise forward — drop it (decision pending) | 2026-09-29 |
+| [D30](#d30) | Ship the single model: the blend collapsed onto one model | 2026-09-29 |
 
 ---
 
@@ -717,3 +720,129 @@ then tune the threshold.
 applies in advance: a blend of three highly correlated models may gain very little for 3x
 inference cost. Measure the delta and be prepared to ship the single model with the ensemble
 kept as a logged experiment — §6.5 says that decision, stated plainly, is the stronger answer.
+
+## D28
+### Split the calibration window interleaved, not temporally
+**Decision.** The calibration window is divided in two: blend weights are fitted on one half,
+the isotonic calibrator on the other. The split is **interleaved by time order**, not temporal.
+Configurable as `decision.calibration_split` in `configs/base.yaml`.
+
+**Why split at all.** §13 Phase 5 lists "calibrating on data used to fit the blend" as a common
+mistake, while asking for both the blend weights *and* the calibrator to be fitted on
+validation. Those instructions collide. Splitting the window resolves it.
+
+**Why interleaved.** A temporal split is the instinctive choice — it mirrors production, where
+you calibrate on the past and apply forward. Measured on v1's window it is a bad trade:
+
+| Split | First half | Second half |
+|---|---|---|
+| temporal | 6,812 rows, **5.74%** late (Jan 1-30) | 6,812 rows, **13.77%** late (Jan 30 - Feb 28) |
+| interleaved | 6,812 rows, **9.84%** late | 6,812 rows, **9.67%** late |
+
+A temporal split would fit the calibrator at 2.4x the base rate of the data the weights were
+fitted on, and 3.1x the evaluation window's 4.40%. That is D20 reappearing *inside* a two-month
+window. Interleaving keeps both halves at the window's own base rate.
+
+**Why this does not violate invariant 5.** That invariant forbids random cross-validation folds
+for *model* fitting, where random folds let future outcomes into as-of features. Nothing is
+recomputed here: the features are already fixed by Phase 3, both halves sit inside the same two
+months, and what is being fitted is a set of blend weights and a one-dimensional monotone
+function. `temporal` remains available so the comparison stays measurable rather than asserted.
+
+**Rejected.** A three-way split (weights / calibrator / threshold). It leaves 210, 331 and 788
+positives respectively — isotonic regression is non-parametric and gets unstable on a few
+hundred positives. The threshold is instead swept on the calibrator's own half and the resulting
+in-sample optimism is stated in the report.
+
+## D29
+### `purchase_month` cannot generalise forward — recommend dropping it
+**Finding, and the one thing Phase 5 leaves open.** SHAP ranked `purchase_month` the **#1
+feature** at mean |SHAP| 0.198, 33% above the second. It should not be there, and it cannot be
+doing what it appears to be doing.
+
+`purchase_month` is the calendar month as an integer 1-12. Under the §4.4 forward split:
+
+- **fit window values: {5, 6, 7, 8, 9, 10, 11, 12}**
+- **calibration window values: {1, 2}**
+- **overlap: none**
+
+The top feature takes values at scoring time that it never saw in training. A tree cannot have
+learned anything about month 1; it routes an unseen value to whichever branch the last split
+left open, so any apparent benefit is an accident of geometry, not a learned seasonal effect.
+
+**A leave-one-out refit confirms it** — each row is a genuine refit on the fit window, scored on
+the whole calibration window:
+
+| Model | PR-AUC with | without | delta | Brier with | without |
+|---|---:|---:|---:|---:|---:|
+| CatBoost | 0.21498 | 0.20927 | **−0.00571** | 0.08528 | **0.08374** |
+| LightGBM | 0.18755 | 0.20251 | **+0.01496** | 0.08910 | **0.08637** |
+| XGBoost | 0.18443 | 0.21498 | **+0.03055** | 0.08916 | **0.08528** |
+
+Dropping it **improves Brier for all three models** and improves PR-AUC for two of three —
+XGBoost by +0.031, which is twice the entire GBDT-over-logistic margin Phase 4 measured. Only
+CatBoost prefers keeping it, and CatBoost is precisely the model whose handling of the unseen
+values happens to land favourably. The sign of the effect is not stable across libraries, which
+is what an accident looks like.
+
+**Recommendation: drop it, leaving 38 features.** §5 sanctions exactly this — "run a correlation
+and permutation-importance audit after the first model and drop 1-3 dead or redundant features.
+Report the surviving number honestly on the CV — if it lands at 37, write 37."
+
+**Why it is not already done.** The change is larger than a Phase 5 step: `FEATURE_NAMES` goes
+39 -> 38, which changes the artifact's input schema hash, invalidates Phase 4's tuned
+hyperparameters and its committed report, and needs `make tune` and `make decide` re-run
+(~12 minutes). It also plausibly changes which model leads — XGBoost without the feature scores
+0.21498 on the calibration window against CatBoost's 0.20927. That is a decision worth making
+deliberately rather than inside a phase whose subject is calibration.
+
+**The alternative worth considering.** Cyclical encoding — `sin(2πm/12)`, `cos(2πm/12)` — would
+give month 1 a representation adjacent to month 12, which *is* in training, so the extrapolation
+problem disappears rather than being removed along with the seasonality. It is two features
+instead of one and is not in §5, so it needs a decision too.
+
+**Either way, this should be settled before Phase 6 registers a model.** Registering one whose
+top feature is structurally unable to generalise forward would put a known defect behind an
+`@champion` alias.
+
+## D30
+### Ship the single model: the blend collapsed onto one model
+**Decision.** Ship **CatBoost** alone. The ensemble is kept as a logged experiment, exactly as
+§6.5 anticipates.
+
+**Measured** on the weight-fitting half of v1's calibration window:
+
+| | PR-AUC | Blend weight |
+|---|---:|---:|
+| **CatBoost** | **0.22455** | **1.0000** |
+| LightGBM | 0.21107 | 0.0000 |
+| XGBoost | 0.20321 | 0.0000 |
+| blend | 0.22455 | — |
+| **delta vs best single** | **+0.00000** | |
+
+The log-loss optimum is a **corner solution**: the optimiser put the entire weight on CatBoost,
+so the blend *is* CatBoost and the delta is exactly zero. Against the 0.005 bar from
+`configs/base.yaml`, the single model ships. §13 could not be more direct — "if the gain is under
+0.005 PR-AUC, say plainly that the single model should ship" — and here the gain is not small,
+it is nil.
+
+**Worth noting: the winner changed between phases.** Phase 4 ranked LightGBM first on
+cross-validated PR-AUC over the *fit* window (0.1528 against CatBoost's 0.1489). On the
+*calibration* window CatBoost leads (0.22455 against 0.21107). Model selection is unstable at
+this margin, which is consistent with D26's fold-to-fold variance, and is a reason to treat the
+promotion gate in Phase 9 as the real arbiter rather than either of these numbers.
+
+**Calibration worked**, on held-out rows rather than in-sample: Brier **0.085847 -> 0.083776**
+on the half the calibrator never saw. The in-sample figure (0.084706 -> 0.082229) is reported
+beside it only to make the difference visible.
+
+**Threshold, under a stated assumption.** Under an assumed 5:1 FN:FP cost ratio the optimal
+threshold is **0.17**, catching **48.1%** of late orders at a **21.6%** flag rate with 21.5%
+precision. The cost ratio is a premise, not a measurement (§4.7). A second caveat: the sweep runs
+on a window whose base rate is roughly twice the evaluation window's, so this threshold is lower
+than one chosen on deployment-era data would be.
+
+**Business impact (§4.7).** On-time orders average **4.291** out of 5; late orders **2.272** — a
+gap of **2.019 review-score points**. 100% of orders in the population carry a review. Reviews
+are used for this analysis only; `review_impact()` asserts no review column has reached the
+feature matrix before returning a number.
