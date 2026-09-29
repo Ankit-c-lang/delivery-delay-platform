@@ -37,17 +37,17 @@ Numeric features are imputed with the **training** median, stored in the artifac
 
 ## Artifact
 
-- Fitted on **36,174** training rows, cutoff `2017-12-31 23:29:31`
-- Latest bundled snapshot month: `2018-03-01 00:00:00` (the §18 A6 serving path)
+- Fitted on **49,798** training rows, cutoff `2018-02-28 23:57:55`
+- Latest bundled snapshot month: `2018-05-01 00:00:00` (the §18 A6 serving path)
 - Input schema hash: `d3e9050f65ce060e`
-- Winsorisation: {'days_to_shipping_limit': 21.2151} at q=0.995
+- Winsorisation: {'days_to_shipping_limit': 21.7734} at q=0.995
 
 ### Category level counts (fitted on training rows only)
 
 | Column | Levels |
 |---|---:|
 | `customer_state` | 29 |
-| `seller_state` | 21 |
+| `seller_state` | 23 |
 | `customer_region` | 7 |
 | `customer_zip_prefix_2` | 100 |
 | `product_category` | 32 |

@@ -26,6 +26,19 @@ from sklearn.metrics import average_precision_score, brier_score_loss, roc_auc_s
 
 logger = logging.getLogger(__name__)
 
+#: Float slack for comparing two PR-AUC values against a threshold.
+#:
+#: Subtracting two float64 metrics that differ by exactly some bound can land either side of it:
+#: ``0.065 - 0.060`` evaluates to ``0.005000000000000002`` while ``0.2200 - 0.2150`` gives
+#: ``0.005000000000000004``. Both the selection band (DECISIONS.md D41) and the promotion gate's
+#: ``min_delta`` therefore need slack at their own boundary, or a decision about ignoring
+#: differences too small to reproduce would itself turn on one. Twelve orders of magnitude below
+#: any threshold either uses, so it can never widen a rule in practice.
+#:
+#: Defined once and imported by both callers: two copies of one constant is the shape of bug this
+#: project has hit repeatedly (CLAUDE.md invariant 17).
+COMPARISON_EPSILON = 1e-12
+
 #: Default review capacity: ops look at the top 10% of orders (PLAN.md §4.6).
 DEFAULT_CAPACITY = 0.10
 

@@ -67,8 +67,10 @@ module does not exist yet is not written (DECISIONS.md D15).
   **`bootstrap` is required before `docker compose up` on a clean machine** (§18 A5): the API
   resolves `@champion` at startup and a fresh registry has none.
 
+- `make promote` (the gate; `DRY=1` to measure without moving the alias)
+
 **Arrive with their phase:**
-- `promote` (9)
+- nothing — Phases 10 and 11 add CI and docs, not new targets
 - `make bootstrap` (8) — the ordered first-run sequence (PLAN §18 A5). **Required before
   `docker compose up` on a clean machine**, because the API resolves `@champion` at startup
   and the registry starts empty.
@@ -251,25 +253,42 @@ against 88.21 — opposite directions, so noise). `@champion` is **v4**.
   `requirements-api.txt` because it reached the venv via *full* `mlflow`, which `mlflow-skinny`
   drops. Only a from-scratch install distinguishes a direct dependency from an inherited one.
 
-**Next: Phase 9 — Retraining lifecycle and promotion gate** (~3.5 h). **Read §18 A2 and A3 first.**
-- `src/evaluation/score_holdout.py` and `src/registry/promote.py` are the only modules allowed to
-  unlock the 2018-05 → 08 window; `AUTHORISED_UNLOCKERS` in `src/splits.py` already names them.
-- The gate compares **v2 (champion) against v3**, not v1: v1 is withdrawn (D33).
-- Set the Brier tolerance against **D20** — the evaluation window's base rate is 4.40% against the
-  calibration window's ~9.75%, so a calibrator fitted there will over-predict here. That is a
-  base-rate shift, not a defective calibrator, and the gate must not punish it as one.
-- PR-AUC on the holdout will be **much lower** than 0.216 for the same reason. Report **lift over
-  base rate**, or an honest number reads as a broken model.
-- Promotion is **not purely a registry operation**: if a challenger ships a different library the
-  API image must be rebuilt first — and possibly **edited**, not just reinstalled. Swapping CatBoost
-  for LightGBM needed `libgomp1` in the runtime stage, an **apt** package no requirements file could
-  have predicted (D41).
-- **Consider whether the gate should apply D41's equivalence band.** It currently compares on PR-AUC
-  with a `min_delta`, so two models inside the band fail the gate even when the challenger is
-  materially cheaper to serve. That is an open design question, not a decided one.
-- `httpx2`: starlette's TestClient warns that using it with `httpx` is deprecated. A new dependency
-  needs approval, so it is **not** installed; it will become an error when starlette removes the
-  shim.
+**Phase 9 COMPLETE.** 435 tests pass. The gate ran for real and **refused**, which is the phase
+working (§8: a no-promote run is a success). `src/evaluation/score_holdout.py` is the only module
+that loads 2018-05 → 08, enforced by `src/splits.py` at runtime and by import inspection in tests.
+
+**THE HEADLINE NUMBER IS 1.36x LIFT, NOT 0.216 PR-AUC** (D42). On the calibration window the
+champion scores 0.21585 at a ~9.75% base rate, about 2.2x lift. On the genuinely later evaluation
+window it manages PR-AUC **0.05983 at a 4.40% base rate — 1.36x lift**, with precision 6.2% at a
+16.3% flag rate. Lift already normalises for D20's base-rate shift, so that fall is **real
+forward-time degradation**. Phase 11 must lead with it; quoting 0.216 without its window is the one
+dishonest thing this project could still do.
+
+**The gate's decision, recorded in `reports/promotions.md`:** challenger v5 (v2 windows, xgboost,
+1.30x) against champion v4 (v1 windows, lightgbm, 1.36x) — **not promoted**, PR-AUC delta −0.00282
+against a +0.005 bar. Brier, schema and latency all cleared. The shortfall is inside the equivalence
+band, so it is a **tie, not a regression**, and a tie leaves the champion alone. v2 saw two months
+more data and gained nothing, which is consistent with D22 (weak history features). **Nothing was
+retuned** — §13 requires recording the loss.
+
+**Why §8 says "the same rows".** Each version's own calibration-window PR-AUC is 0.20766 (v4) and
+0.24084 (v5), which would suggest the challenger is far better — but those are different windows with
+different base rates and are not comparable. On the only window both are scored on, the ordering
+reverses.
+
+**The gate's known limit, for Phase 10-11 to state plainly:** the challenger ships **XGBoost** while
+`requirements-api.txt` installs **LightGBM**, so promoting v5 would have produced a container that
+cannot unpickle its own model. With D41's `libgomp1` finding, promotion is **an alias move plus an
+image that can load what the alias points at** — and the gate checks only the first half.
+
+**Next: Phase 10 — Full CI/CD** (~3 h).
+- CI is still **lint-only**. `make test-unit` exists for exactly this and has never run in CI, so
+  all 435 tests are local-only. Expect the first CI run with pytest to find machine-dependent tests.
+- §10.3 wants a Postgres service container, the ETL smoke test on synthetic fixtures, coverage, and
+  the image build pushed to GHCR.
+- The live-container tests in `tests/test_docker.py` skip without a daemon, and the integration tests
+  need Postgres and the 121 MB dataset that CI will never have — `-m "not integration and not slow"`
+  is what `test-unit` already encodes.
 
 The `realtime-fraud-detection` stack is currently **stopped** to free RAM. Restart it with
 `docker start realtime-fraud-detection-redis-1 realtime-fraud-detection-scorer-1

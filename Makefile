@@ -8,7 +8,7 @@ PY := .venv/bin/python
 COMPOSE := docker compose -f docker-compose.yml
 
 .DEFAULT_GOAL := help
-.PHONY: help lint format test test-unit up down stop ps logs psql health check-data load-raw serve bench bootstrap build api-up api-down api-logs \
+.PHONY: help lint format test test-unit up down stop ps logs psql health check-data load-raw serve bench bootstrap build api-up api-down api-logs promote \
         build-orders etl snapshots features baselines tune decide train registry
 
 help: ## List available targets
@@ -145,3 +145,8 @@ bootstrap: ## Ordered first run on a clean machine (PLAN.md 18 A5). REQUIRED bef
 	@echo
 	@echo "Bootstrap complete. The registry now has a champion, so the API can resolve it:"
 	@echo "    make build && make api-up"
+
+# --- Phase 9 -------------------------------------------------------------------
+
+promote: ## Run the promotion gate: score @champion and @challenger on the holdout and decide
+	$(PY) -m src.registry.promote $(if $(DRY),--dry-run,)

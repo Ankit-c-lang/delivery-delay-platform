@@ -5,8 +5,8 @@ that task. Source of truth for *what* to build is `PLAN.md`; this file only trac
 are*. Decisions and their reasons live in `DECISIONS.md`.
 
 - **Plan version:** v1 (2026-09-28) + amendments §18 · **Pre-flight completed:** 2026-09-28
-- **Current phase:** Phase 8 — Docker and Compose · **✅ COMPLETE**
-- **Overall:** **9 / 12 phases** · 411 tests green, zero skips · Phase 6's output rebuilt after two real bugs (D33, D35)
+- **Current phase:** Phase 9 — Retraining lifecycle and promotion gate · **✅ COMPLETE**
+- **Overall:** **10 / 12 phases** · 435 tests green, zero skips · Phase 6's output rebuilt after two real bugs (D33, D35)
 - **Estimated remaining:** ~20 h of build work (PLAN §3 budget: 36-42 h)
 
 ---
@@ -101,7 +101,82 @@ what a registry is for, and superseding is the more honest artefact. Moving the 
 documented one-off — `_assign_alias` correctly *refused* to promote v2, because promotion is the
 gate's call; withdrawing a version built by broken code is a correction, not a promotion on merit.
 
-### Phase 8 — the container, and three things only a container could find
+### Phase 9 — the gate refused, which is the phase working
+
+**Complete.** `make promote` scored both aliases on the identical 25,352-row window and left the
+champion in place. §8 is explicit that a no-promote run is a success; a gate that always passes is
+decoration.
+
+#### The headline number, and it is not the one from Phase 5
+
+| | calibration window | **evaluation window (2018-05 → 08)** |
+|---|---:|---:|
+| base rate | ~9.75% | **4.40%** |
+| PR-AUC | 0.21585 | **0.05983** |
+| **lift** | ~2.2x | **1.36x** |
+| precision at threshold | 24.8% | **6.2%** at a 16.3% flag rate |
+
+Lift already normalises for the base-rate shift D20 measured, so the fall from 2.2x to 1.36x is
+**real forward-time degradation**, not arithmetic. **Phase 11 must lead with 1.36x.** Quoting 0.216
+without naming its window is the one dishonest thing left available to this project, and it would be
+the first thing an interviewer probed.
+
+#### The decision
+
+| | challenger v5 (v2 windows, xgboost) | champion v4 (v1 windows, lightgbm) |
+|---|---:|---:|
+| PR-AUC / lift | 0.05700 / 1.30x | **0.05983 / 1.36x** |
+| ROC-AUC | 0.57219 | 0.61247 |
+| Brier | 0.053789 | 0.049307 |
+| recall / flag rate | 23.6% / 17.8% | 23.0% / 16.3% |
+| p95 latency | 69.1 ms | 83.9 ms |
+
+**Not promoted.** Brier (+0.004482 against a 0.010 tolerance), schema and p95 all cleared; PR-AUC
+failed at −0.00282 against a +0.005 bar. The shortfall sits *inside* the equivalence band, so it is a
+**tie rather than a regression** — and a tie leaves the incumbent alone, because promotion costs an
+image build, a deployment and risk.
+
+v2 trained on two months more data and gained nothing, which is what D22 predicted: two extra months
+of a thin signal buys nothing. **Nothing was retuned** (§13).
+
+#### Why §8's "same rows" is the load-bearing phrase
+
+Each version's own calibration-window PR-AUC is **0.20766 for v4 and 0.24084 for v5**. Read naively
+the challenger is much better — but v1 calibrates on 2018-01 → 02 and v2 on 2018-03 → 04, different
+rows with different base rates, so the numbers are not comparable at all. On the only window both are
+measured on, the ordering **reverses**. A gate that trusted each version's own reported metric would
+have promoted confidently on an artefact of which months each happened to validate against.
+
+#### Two of my own defects, both caught by the tests
+
+1. **A float boundary on the strict side**, mirroring D41's on the inclusive side. §8 requires
+   *strictly greater* than champion + min_delta, and `0.065 - 0.060` is `0.005000000000000002` in
+   float64 — so a challenger exactly on the bar promoted on representation error. `COMPARISON_EPSILON`
+   moved from `ensemble.py` into `src/evaluation/metrics.py`, so the selection band and the gate share
+   **one** definition (invariant 17). Tests pin the boundary from both sides.
+2. **A message asserting something unmeasured.** The tie explanation read "being cheaper to serve is
+   not grounds for promotion" — false in the first real run, where v5 ships XGBoost at 85 MB against
+   the champion's LightGBM at 10 MB. A gate's own explanation is the last place for a claim it has not
+   measured. A test now asserts the reason mentions neither cost nor megabytes.
+
+#### What the gate cannot do, which is the most useful thing learned
+
+The challenger ships **XGBoost** while `requirements-api.txt` installs **LightGBM**, so promoting v5
+would have produced a container unable to unpickle its own model. With D41's `libgomp1` finding —
+where changing the library also changed the image's *system* packages — **promotion is an alias move
+plus an image that can load what the alias points at.** The gate checks only the first half. Worth
+saying plainly in Phase 11 rather than implying the alias is the whole story.
+
+#### What could not be run for real
+
+§8 asks for two live runs, v1 uncontested and v2 contested. The contested run is above. The
+uncontested branch cannot be exercised against this registry without destroying state — a champion has
+existed since Phase 6, and v1's original promotion came from `_assign_alias` at registration time,
+which is §8's auto-promote rule rather than the gate. It is covered by tests instead, including that
+**uncontested does not mean unchecked**: a first version with a broken schema or a blown latency
+budget is still refused.
+
+### Phase 8 — the container, and three things only a container could find### Phase 8 — the container, and three things only a container could find
 
 **Complete.** `docker compose down && docker compose up -d` gives a healthy three-service stack and
 a working prediction. Verified in that order, and `-v` was never passed: both
@@ -763,8 +838,8 @@ since the real dataset is 121 MB and CC BY-NC-SA and will never be in a workflow
 | 6 | MLflow, pyfunc wrapper, registry | 4 h | medium | ✅ **complete** · v1 `@champion`, loads in a fresh process |
 | 7 | FastAPI and the parity test | 4 h | medium | ✅ **done** · parity green at 1e-6 · single p50 52.6 ms |
 | 8 | Docker and Compose | 3 h | medium | ✅ **done** · **1.03 GB** image, 65 packages · cold cycle verified · D41 band ships lightgbm |
-| 9 | Retraining lifecycle and promotion gate | 3.5 h | medium | **next** · ⚠️ read §18 A2, A3 · gate compares **v2 vs v3** (v1 withdrawn) · Brier tolerance against D20 |
-| 10 | Full CI/CD | 3 h | medium | CI gains pytest + Postgres service container |
+| 9 | Retraining lifecycle and promotion gate | 3.5 h | medium | ✅ **done** · gate ran for real and **refused** · holdout lift **1.36x** |
+| 10 | Full CI/CD | 3 h | medium | **next** · CI is still lint-only; all 435 tests are local-only |
 | 11 | Documentation and interview prep | 2.5 h | easy | |
 
 **If behind schedule, cut in this order** (PLAN §3): drift report, prediction logging,

@@ -246,6 +246,44 @@ class DelayPredictor(mlflow.pyfunc.PythonModel):
         }
 
 
+class SignatureMismatchError(RuntimeError):
+    """A logged model's input signature disagrees with :data:`RAW_INPUT_COLUMNS`."""
+
+
+def assert_signature_matches_contract(pyfunc: Any, *, what: str = "the loaded model") -> None:
+    """Check a logged model's signature against the request contract.
+
+    Args:
+        pyfunc: An ``mlflow.pyfunc`` model.
+        what: How to name the subject in an error message, e.g. ``"challenger v5"``.
+
+    Raises:
+        SignatureMismatchError: If the signature is absent, or disagrees with
+            :data:`RAW_INPUT_COLUMNS`.
+
+    **Lives here, beside the contract it checks, and not in the API layer.** It began in
+    ``api/model_loader.py``, and Phase 9's gate needs the identical check — §8 requires a promotion
+    to verify "challenger feature schema matches the serving contract". Two copies of one rule is
+    the shape of bug this project has hit three times (CLAUDE.md invariant 17), so there is one
+    implementation and two callers: the API refuses to start, and the gate refuses to promote.
+    """
+    signature = getattr(pyfunc.metadata, "signature", None)
+    if signature is None or signature.inputs is None:
+        raise SignatureMismatchError(
+            f"{what} carries no input signature, so its contract cannot be checked; log it with "
+            "signature= (PLAN.md §7 names omitting it as a common mistake)"
+        )
+    served = tuple(sorted(column.name for column in signature.inputs.inputs))
+    expected = tuple(sorted(RAW_INPUT_COLUMNS))
+    if served != expected:
+        missing = sorted(set(expected) - set(served))
+        extra = sorted(set(served) - set(expected))
+        raise SignatureMismatchError(
+            f"{what} does not match the serving contract. missing={missing} unexpected={extra}. "
+            "The model and this code were built from different versions of src/features."
+        )
+
+
 def raw_input_example(orders: pd.DataFrame, n: int = 5) -> pd.DataFrame:
     """Build an ``input_example`` for ``log_model`` from real order records.
 

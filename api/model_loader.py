@@ -78,38 +78,6 @@ def _resolve_version(settings: Settings, pyfunc: Any) -> str:
         return f"unknown (run {run_id})" if run_id else "unknown"
 
 
-def assert_signature_matches_contract(pyfunc: Any) -> None:
-    """Fail at startup if the loaded model does not want the columns this API sends.
-
-    Raises:
-        RuntimeError: If the signature is absent or disagrees with
-            :data:`~src.registry.pyfunc_wrapper.RAW_INPUT_COLUMNS`.
-
-    This is the check that makes scoring through the unwrapped predictor safe. MLflow would
-    otherwise enforce the input schema on every ``pyfunc.predict`` call; enforcing it once here is
-    both cheaper and better placed — a model whose contract has moved should refuse to start, not
-    return 500s under load.
-    """
-    from src.registry.pyfunc_wrapper import RAW_INPUT_COLUMNS
-
-    signature = getattr(pyfunc.metadata, "signature", None)
-    if signature is None or signature.inputs is None:
-        raise RuntimeError(
-            "the loaded model carries no input signature, so its contract cannot be checked; "
-            "log it with signature= (PLAN.md §7 names omitting it as a common mistake)"
-        )
-    served = tuple(sorted(column.name for column in signature.inputs.inputs))
-    expected = tuple(sorted(RAW_INPUT_COLUMNS))
-    if served != expected:
-        missing = sorted(set(expected) - set(served))
-        extra = sorted(set(served) - set(expected))
-        raise RuntimeError(
-            "the loaded model's signature does not match this API's request contract. "
-            f"missing={missing} unexpected={extra}. The model and the API were built from "
-            "different versions of src/features; rebuild the image or roll the model back."
-        )
-
-
 def load_model(settings: Settings) -> LoadedModel:
     """Resolve and load the model, or raise.
 
@@ -137,7 +105,11 @@ def load_model(settings: Settings) -> LoadedModel:
 
     logger.info("loading %s (%s)", uri, settings.model_uri_kind.value)
     pyfunc = mlflow.pyfunc.load_model(uri)
-    assert_signature_matches_contract(pyfunc)
+    # One implementation, two callers: the API refuses to start on a mismatch and the Phase 9 gate
+    # refuses to promote on one. See src/registry/pyfunc_wrapper.py (CLAUDE.md invariant 17).
+    from src.registry.pyfunc_wrapper import assert_signature_matches_contract
+
+    assert_signature_matches_contract(pyfunc, what=f"the model at {uri}")
 
     predictor = pyfunc.unwrap_python_model()
     if not hasattr(predictor, "score"):

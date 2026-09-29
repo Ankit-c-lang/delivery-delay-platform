@@ -35,16 +35,12 @@ from scipy.optimize import minimize
 from sklearn.isotonic import IsotonicRegression
 from sklearn.metrics import log_loss
 
-from src.evaluation.metrics import brier, pr_auc
+from src.evaluation.metrics import COMPARISON_EPSILON, brier, pr_auc
 
 logger = logging.getLogger(__name__)
 
 #: Probabilities are clipped away from 0 and 1 before log-loss, which is otherwise infinite.
 EPSILON = 1e-7
-
-#: Slack on the selection band's boundary comparison, absorbing float64 subtraction error only.
-#: Twelve orders of magnitude below the band itself, so it can never widen the rule in practice.
-BAND_EPSILON = 1e-12
 
 
 @dataclass(frozen=True)
@@ -389,11 +385,11 @@ def select_single_model(
         )
 
     best = max(scores, key=lambda name: scores[name])
-    # BAND_EPSILON, not a bare <=. Subtracting two float64 PR-AUCs that differ by exactly the band
+    # COMPARISON_EPSILON, not a bare <=. Subtracting two float64 PR-AUCs that differ by the band
     # can land a hair above it — 0.2200 - 0.2150 evaluates to 0.005000000000000004 — so a model
     # sitting precisely on the documented boundary would be excluded by float representation alone.
     # A rule about ignoring differences too small to reproduce should not itself turn on one.
-    within = [name for name in scores if scores[best] - scores[name] <= band + BAND_EPSILON]
+    within = [name for name in scores if scores[best] - scores[name] <= band + COMPARISON_EPSILON]
     # Cheapest first; ties on cost broken by PR-AUC, then by name so the result is deterministic
     # whatever order the dict arrived in.
     contenders = sorted(within, key=lambda name: (costs_mb[name], -scores[name], name))

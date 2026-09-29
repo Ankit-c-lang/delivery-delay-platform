@@ -1440,3 +1440,76 @@ CatBoost's own wheel, because dropping it also drops what it pulled in.
 gate on PR-AUC even when the challenger is materially cheaper to serve. Whether the gate should
 apply the same band — and if so, whether "cheaper inside the band" is grounds for promotion — is a
 Phase 9 design decision, not something to settle here.
+
+---
+
+## D42
+### The gate refused the retrain, and that is the result
+**Date.** 2026-09-29 (Phase 9)
+
+**What happened.** v2 — trained on 2017-05 → 2018-02, two months more data than v1, with refreshed
+as-of snapshots — was registered as v5 and evaluated against champion v4 on the identical 25,352-row
+evaluation window. **It was not promoted.**
+
+| | challenger v5 (v2 windows, xgboost) | champion v4 (v1 windows, lightgbm) |
+|---|---:|---:|
+| PR-AUC | 0.05700 | **0.05983** |
+| **lift over a 4.40% base rate** | 1.30x | **1.36x** |
+| ROC-AUC | 0.57219 | 0.61247 |
+| Brier | 0.053789 | 0.049307 |
+| recall / flag rate | 23.6% / 17.8% | 23.0% / 16.3% |
+| p95 latency | 69.1 ms | 83.9 ms |
+
+Three checks cleared — Brier regression +0.004482 inside a 0.010 tolerance, schema matched, p95 well
+under the 250 ms budget. PR-AUC failed at −0.00282 against a +0.005 bar. Since the shortfall is
+*inside* the equivalence band, this is a **tie, not a regression**: neither model is demonstrably
+better on these rows. A tie leaves the champion in place.
+
+**Why "the same rows" is the load-bearing words in §8.** Each version's own calibration-window
+PR-AUC — the number its training run logged — is **0.20766 for v4 and 0.24084 for v5**. Read naively
+that says the challenger is much the better model. But those are *different windows*: v1 calibrates
+on 2018-01 → 02 and v2 on 2018-03 → 04, with different rows and different base rates, so the two
+numbers are not comparable at all. The holdout is the only window both models are measured on, and
+there the ordering reverses. A gate that compared each version's own reported metric would have
+promoted confidently on an artefact of which months each happened to validate against — which is
+precisely the failure §8's "same rows, same code path, no re-fitting" exists to prevent.
+
+**More data did not help, and that is consistent with everything already measured.** D22 found the
+history features weak; D20 found the base rate non-stationary. Two extra months of a signal that
+thin buys nothing. §13 is explicit that a losing challenger must be recorded rather than tuned until
+it wins, so nothing was retuned.
+
+**The number that should go in the README is 1.36x lift, not 0.216 PR-AUC.** On the calibration
+window the champion scores 0.21585 at a ~9.75% base rate — about 2.2x lift. On genuinely later data
+it manages **1.36x**. Lift already normalises for the base-rate shift D20 measured, so the fall from
+2.2x to 1.36x is real forward-time degradation, not arithmetic. Precision is 6.2% at a 16.3% flag
+rate against a 4.40% base rate. **This model is weak on future data**, and Phase 11 should lead with
+that rather than bury it: the project's value is the lifecycle, and a lifecycle that reports 1.36x
+honestly is worth more than one that quotes 0.216 without its window.
+
+**What the gate could not run for real.** §8 asks for two live runs, v1 uncontested and v2 contested.
+The contested run is above. The uncontested branch cannot be exercised against this registry without
+destroying state, because a champion has existed since Phase 6 — and v1's original promotion happened
+at registration time through `_assign_alias`, which is §8's "first version is auto-promoted" rule, not
+the gate. That branch is covered by tests instead, including that *uncontested does not mean
+unchecked*: a first version with a broken schema or a blown latency budget is still refused.
+
+**A float boundary on the strict side, the mirror of D41's.** §8 says the challenger must score
+*strictly greater* than champion + min_delta, and `0.065 - 0.060` is `0.005000000000000002` in
+float64 — so a challenger sitting exactly on the bar promoted on representation error. The comparison
+now carries `COMPARISON_EPSILON`, which was **moved out of `ensemble.py` into
+`src/evaluation/metrics.py`** so the selection band and the gate share one definition rather than
+two. A test pins the boundary from both sides.
+
+**A message that claimed something it had not measured.** The tie explanation originally read "being
+cheaper to serve is not grounds for promotion", which was false in the very first real run: v5 ships
+XGBoost at 85 MB against the champion's LightGBM at 10 MB, so the challenger was *more* expensive. A
+gate's own explanation is the last place that should assert an unmeasured fact. It now explains only
+the tie, and a test asserts the reason string mentions neither cost nor megabytes.
+
+**And the operational coupling became concrete.** The challenger ships **XGBoost** while
+`requirements-api.txt` installs **LightGBM**, so promoting v5 would have produced a container that
+cannot unpickle its own model — on top of the `libgomp1` lesson from D41, where changing the shipped
+library also changed the image's *system* packages. Promotion is not an alias move: it is an alias
+move plus an image that can load what the alias points at. The gate does not currently check that,
+which is the most useful thing Phase 9 learned about its own limits.

@@ -1,0 +1,54 @@
+# The promotion gate (PLAN.md §8). Every threshold here is a number so that a promotion is a
+# decision the code makes, not one a person makes and the code records.
+#
+# A "no-promote" run is a SUCCESS, not a failure. A gate that always passes is decoration; the
+# point of writing one is that it can refuse.
+
+# --- The discrimination bar -----------------------------------------------------------------
+# The challenger must beat the champion's PR-AUC by more than this on the identical holdout.
+#
+# THIS IS THE SAME IDEA AS decision.selection_band_pr_auc IN base.yaml, and deliberately the same
+# number. Both say: a PR-AUC difference smaller than this pipeline's reproducibility floor is not a
+# difference. DECISIONS.md D35 measured that floor — thread count alone moved CatBoost by 0.005 on
+# identical data with identical hyperparameters.
+#
+# `src/registry/promote.py` ASSERTS that min_delta >= decision.selection_band_pr_auc. The gate may
+# be stricter than selection, because promotion costs an image build, a deployment and risk; it must
+# never be looser, because that would promote on a difference selection itself refused to believe.
+min_delta_pr_auc: 0.005
+
+# --- The calibration guard ------------------------------------------------------------------
+# Brier may worsen by at most this much. Without it a challenger can buy ranking with calibration:
+# PR-AUC only cares about order, so a model can win on it while its probabilities drift badly, and
+# every downstream decision that reads a probability rather than a rank would quietly degrade.
+#
+# The tolerance is generous ON PURPOSE. DECISIONS.md D20 measured the evaluation window at a 4.40%
+# base rate against the calibration window's ~9.75%, so a calibrator fitted there WILL over-predict
+# here. That is a base-rate shift, not a defective calibrator, and a tight tolerance would reject
+# every honest challenger for a property of the data. Both versions are measured on the same rows,
+# so the shift hits both equally and the COMPARISON stays fair.
+max_brier_regression: 0.010
+
+# --- The serving budget ---------------------------------------------------------------------
+# p95 for a single prediction, measured on holdout rows through the challenger's own pyfunc.
+#
+# Set from measurement, not from a wish: Phase 7-8 measured p95 between 60 ms and 87 ms, almost all
+# of it fixed overhead in the as-of snapshot join rather than the model. 250 ms leaves real headroom
+# while still failing a challenger that is an order of magnitude slower — which is the case worth
+# catching, since a model that ranks marginally better and serves ten times slower is not an
+# improvement at checkout.
+max_p95_latency_ms: 250.0
+
+# Predictions timed for the latency measurement. Enough for a stable p95 without making the gate
+# slow; the first few are discarded as warm-up.
+latency_samples: 60
+latency_warmup: 5
+
+# --- What a pass does -----------------------------------------------------------------------
+# The alias moved on promotion, and the tag written on the version it replaces.
+champion_alias: champion
+challenger_alias: challenger
+archived_tag_value: archived
+
+# Every run appends here, pass or fail. The refusals are the interesting entries.
+report_path: reports/promotions.md
