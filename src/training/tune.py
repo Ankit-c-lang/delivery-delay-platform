@@ -618,7 +618,7 @@ def main(argv: list[str] | None = None) -> int:
         datefmt="%H:%M:%S",
     )
 
-    from src.features.build import build_matrix
+    from src.features.build import build_matrix, window_slice
     from src.splits import version_splits
 
     built = build_matrix(args.version)
@@ -626,12 +626,12 @@ def main(argv: list[str] | None = None) -> int:
 
     # Tune on the FIT window only. The calibrate window belongs to Phase 5, and touching it
     # here would make its blend weights and threshold in-sample (§18 A2).
+    #
+    # window_slice puts the rows in a deterministic total order. TimeSeriesSplit cuts folds
+    # positionally, so an arbitrary order among tied timestamps moves every fold boundary and
+    # the hyperparameters selected here move with it (DECISIONS.md D35).
     fit = version_splits(args.version).fit
-    mask = fit.mask(orders["order_purchase_timestamp"]).to_numpy()
-    order = np.argsort(orders.loc[mask, "order_purchase_timestamp"].to_numpy(), kind="stable")
-    X = matrix.loc[mask].iloc[order].reset_index(drop=True)
-    y = labels.loc[mask].to_numpy()[order].astype(int)
-    timestamps = orders.loc[mask, "order_purchase_timestamp"].iloc[order].reset_index(drop=True)
+    X, y, timestamps = window_slice(fit, orders, matrix, labels)
     assert_time_sorted(timestamps)
 
     base_rate = float(y.mean())

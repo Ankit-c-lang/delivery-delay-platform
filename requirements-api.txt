@@ -1,14 +1,24 @@
 # Serving-only subset — PLAN.md §11. The API image must not carry the training stack.
 #
-# Excluded on purpose: optuna, shap, matplotlib, pandera, catboost.
+# Excluded on purpose: optuna, shap, matplotlib, pandera.
 #
 # mlflow-skinny, not mlflow: the API loads a registered pyfunc and resolves an alias, it
 # never runs a tracking server or the UI. Skinny drops those dependencies. Verify in
 # Phase 8 that the pyfunc still loads under it, and measure the image size difference —
 # that number is the justification.
 #
-# CAVEAT: if the final Phase 5 blend includes CatBoost, catboost must be added back here
-# or the artifact will not load at serve time. Revisit when the blend is fixed.
+# The CatBoost caveat that used to sit here has FIRED. Phase 5's first answer was "ship
+# XGBoost", which was an artefact of unpinned thread counts (DECISIONS.md D35); with threads and
+# seeds pinned, catboost wins at 0.21604 and it is what the pyfunc pickles. So catboost is a
+# serving dependency, not an optional one: without it the artifact raises on unpickle.
+#
+# This is the cost of that bug being caught late — Phase 8 now carries CatBoost's wheel in the
+# API image. Measure it there against the xgboost-cpu saving D14 flagged, and report both.
+#
+# OPERATIONAL COUPLING, worth saying out loud: this file tracks what the CHAMPION ships. If the
+# Phase 9 gate promotes a challenger that ships a different library, the image must be rebuilt
+# before that promotion can be served. Promotion is therefore not purely a registry operation,
+# and Phase 9 should say so rather than imply an alias move is always sufficient.
 
 mlflow-skinny
 
@@ -20,8 +30,7 @@ pydantic-settings
 pandas
 numpy
 scikit-learn
-lightgbm
-xgboost
+catboost
 
 sqlalchemy
 psycopg2-binary

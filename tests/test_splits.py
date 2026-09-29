@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import ast
 import re
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import ClassVar
 
@@ -164,6 +164,26 @@ class TestConfiguredWindows:
         warmup = warmup_window()
         for version in available_versions():
             assert warmup.end < version_splits(version).fit.start
+
+    def test_no_version_may_bundle_a_snapshot_reaching_the_evaluation_window(self):
+        """The config-level half of DECISIONS.md D33.
+
+        ``aggregates_through`` bounds which as-of snapshot a version may bundle for serving.
+        A snapshot month M contains outcomes with ``delivered < M``, so the newest month a
+        version may bundle is ``aggregates_through + 1 day``. If that ever exceeded the
+        promotion evaluation start, the champion would serve the gate's own rows using
+        aggregates computed from their outcomes — and the gate would be reading the answer key.
+
+        This guards the configuration, so an edit to splits.yaml cannot reintroduce the bug
+        even if the artifact code stays correct.
+        """
+        evaluation_start = promotion_evaluation_starts_on()
+        for version in available_versions():
+            newest_bundleable = version_splits(version).aggregates_through + timedelta(days=1)
+            assert newest_bundleable <= evaluation_start, (
+                f"{version} could bundle the {newest_bundleable} snapshot, which aggregates "
+                f"outcomes up to the evaluation window starting {evaluation_start}"
+            )
 
     def test_analysis_window_contains_everything(self):
         analysis = analysis_window()

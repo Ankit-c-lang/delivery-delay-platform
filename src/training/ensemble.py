@@ -518,7 +518,7 @@ def build_decision(version: str = "v1", run_shap: bool = True) -> dict[str, Any]
     import yaml
 
     from src.db import get_engine
-    from src.features.build import build_matrix
+    from src.features.build import build_matrix, window_slice
     from src.splits import version_splits
     from src.training.tune import (
         fit_final_model,
@@ -541,18 +541,10 @@ def build_decision(version: str = "v1", run_shap: bool = True) -> dict[str, Any]
     )
     splits = version_splits(version)
 
-    def slice_window(window) -> tuple[pd.DataFrame, np.ndarray, pd.Series]:
-        mask = window.mask(orders["order_purchase_timestamp"]).to_numpy()
-        stamps = orders.loc[mask, "order_purchase_timestamp"]
-        order = np.argsort(stamps.to_numpy(), kind="stable")
-        return (
-            matrix.loc[mask].iloc[order].reset_index(drop=True),
-            labels.loc[mask].to_numpy()[order].astype(int),
-            stamps.iloc[order].reset_index(drop=True),
-        )
-
-    X_fit, y_fit, _ = slice_window(splits.fit)
-    X_cal, y_cal, stamps_cal = slice_window(splits.calibrate)
+    # window_slice, not an inline argsort: the ordering rule lives in exactly one place because
+    # getting it wrong is invisible — see DECISIONS.md D35.
+    X_fit, y_fit, _ = window_slice(splits.fit, orders, matrix, labels)
+    X_cal, y_cal, stamps_cal = window_slice(splits.calibrate, orders, matrix, labels)
     logger.info(
         "fit %d rows (%.4f late) | calibrate %d rows (%.4f late)",
         len(X_fit),

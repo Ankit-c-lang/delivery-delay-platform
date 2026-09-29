@@ -1000,3 +1000,235 @@ against requested, and seconds spent — as params on each child run.
 file (the skew bug above). Stages instead of aliases — removed in MLflow 3, so not available
 even if wanted (§18 A7). Re-tuning inside `train.py` (ten minutes per run, for a dictionary
 that already exists).
+
+---
+
+## D33
+### The bundled serving snapshot is a per-version contract, not "the newest month"
+**Date.** 2026-09-29 (found in Phase 7, fixing Phase 3)
+
+**Decision.** `PreprocessingArtifact.fit` takes a required `aggregates_through` and bundles the
+newest snapshot month `M` satisfying `M <= aggregates_through + 1 day`, raising if none exists.
+`build_matrix` passes `splits.aggregates_through`. The cutoff is recorded in
+`artifact.metadata` so an artifact on disk can be checked against its version's contract
+without `configs/splits.yaml`.
+
+**The bug.** `fit` took `max(snapshot_month)` over whatever snapshots it was handed, and
+`build_matrix` handed it every snapshot in the database — 2017-02 through 2018-08. So the v1
+artifact, whose `train_cutoff` is 2017-12-31, bundled the **2018-08** snapshot. Every served
+prediction used aggregates from eight months after the model was supposedly built. A model
+built as of end-February 2018 cannot have seen August 2018; the serving path was an
+anachronism.
+
+**Why it mattered, beyond tidiness.** The 2018-08 snapshot aggregates outcomes delivered before
+2018-08-01, which includes May, June and July 2018 deliveries — the outcomes of orders inside
+the promotion evaluation window (2018-05 → 08). Scoring the champion through the serving path on
+that window would have read the gate's own answer key. Worse, v1 and v2 would both have bundled
+the *same* 2018-08 snapshot, so the Phase 9 contest would not even have been between two
+distinct models' histories.
+
+**`aggregates_through` was a dangling invariant.** It was declared per version in
+`configs/splits.yaml`, and `assert_windows_ordered` even asserted it equals `calibrate.end` —
+and then nothing read it. Declared, validated, unused. The lesson is that validating a config
+value is not the same as enforcing it: the assertion proved the number was *consistent*, never
+that anything *obeyed* it.
+
+**The off-by-one is load-bearing.** `build_snapshots` filters on `delivered < M`, so snapshot
+month `M` contains only outcomes resolved strictly before `M`. `M` is therefore permissible iff
+every outcome in it resolved on or before `aggregates_through`, i.e. iff
+`M <= aggregates_through + 1 day`. v1 (`aggregates_through` 2018-02-28) bundles **2018-03-01**;
+v2 (2018-04-30) bundles **2018-05-01**. Both contain only outcomes predating the evaluation
+window, because eval-window orders are *purchased* from 2018-05-01 and delivered later still.
+Being one month tighter would have discarded a month of legitimate history; one looser is the
+leak.
+
+**Measured.** Same 3,000 orders, bundled 2018-08 versus the correct 2018-03: **100% of rows**
+change, `route_order_count_hist` by a mean of **4,224.76** orders, `seller_order_count_hist` by
+**71.76**, `route_avg_delivery_days_hist` by **0.67** days. Not cosmetic.
+
+**What was *not* affected.** The training matrix. `transform_with_snapshots` joins each order to
+its own purchase-month snapshot, so fit-window rows only ever saw snapshots ≤ 2017-12 and §18 A1
+held throughout. Every Phase 4 and Phase 5 number — tuned params, blend weights, the isotonic
+calibrator, threshold 0.20690, cal PR-AUC 0.20250 — is computed from that matrix and is
+unchanged. A test asserts this directly: two artifacts differing only in `aggregates_through`
+produce byte-identical `transform_with_snapshots` output. The bug lived entirely in the serving
+path, which is why six phases of green tests never touched it.
+
+**A test encoded the bug.** `test_the_bundled_snapshot_is_the_latest_month` asserted
+`latest_snapshot_month == 2018-08-01` and passed for two phases. It pinned the *mechanism* ("the
+newest month is bundled") rather than the *contract* ("the newest month this version may see").
+A test written from the implementation cannot catch the implementation being wrong. It is now
+`test_the_bundled_snapshot_is_the_newest_the_version_is_allowed`, derived from `splits.yaml`,
+plus a config-level guard in `test_splits.py` asserting no version's bundleable month can reach
+the evaluation window — so the bug cannot return through either the code or the config.
+
+**Registry consequence: v1 was withdrawn, not deleted.** The registered v1 carried the
+anachronistic artifact, so it could not remain `@champion`: the Phase 9 gate would have scored a
+contaminated champion against a correct challenger and the champion would have looked unfairly
+good. The corrected model was registered as **v2**, `@champion` moved to it, and v1 tagged
+`status=withdrawn: do not deploy` with the reason. `print_registry` now prints that status,
+because a withdrawn version keeps its metrics and would otherwise read as a plausible candidate.
+
+Deleting v1 outright was the first intent and was **rejected** — partly because destroying
+registry history is the opposite of what a registry is for, and partly because it is irreversible
+for a cosmetic gain (version numbers restarting at 1). Superseding is also the more honest
+artefact: "a bug was found in the champion's serving path, a corrected version was registered,
+the alias moved, and the bad version was tagged so nothing deploys it" is what actually happens
+in production, and the registry now shows it. Phase 9's gate therefore compares **v2 against v3**
+rather than v1 against v2, which needs one sentence of explanation and loses nothing.
+
+**Moving the alias by hand here is a deliberate exception, not a precedent.** `_assign_alias`
+refused to promote v2 — correctly, because promotion is the gate's decision, and it logged
+exactly that. Withdrawing a version built by broken code is a *correction*, not a promotion on
+merit, so it was done explicitly and outside `src/registry/promote.py`. That module stays the only
+thing that promotes on evidence.
+
+---
+
+## D34
+### `purchase_month` is computed, not requested — the serving contract is 24 columns
+**Date.** 2026-09-29 (Phase 7)
+
+**Decision.** `purchase_month` moved out of `RAW_INPUT_COLUMNS` into a new `COMPUTED_COLUMNS`
+set, alongside the 15 history columns. A caller supplying it is **refused**. The request contract
+is **24 columns**, not 25.
+
+**Why.** `PreprocessingArtifact.transform` forces `purchase_month` to the bundled snapshot's
+month (§18 A6), so a supplied value is discarded before it can reach a feature. Requiring a field
+and then ignoring it is worse than not requiring it: it invites a client to believe the API scores
+historical orders by sending an old month, and it does not. §18 A6 reserves historical scoring for
+an explicit as-of argument that v1 does not implement, so refusing the column now keeps that door
+usable later instead of silently pre-empting it.
+
+**Found by writing the API contract, which is the point of doing that first.** The column had been
+in the contract since Phase 6 purely because `RAW_INPUT_COLUMNS` is *derived* — `REQUIRED_INPUT_COLUMNS`
+plus the entity keys the snapshot join needs. Deriving the list stopped it drifting from the
+feature set, which was the right call, but it also meant nobody ever read the list and asked
+whether a client could sensibly supply every item on it.
+
+**Rejected.** Accepting and ignoring it (a lie in the signature). Having the API derive it from
+`order_purchase_timestamp` — that is preprocessing, and CLAUDE.md invariant 4 puts all of it inside
+the pyfunc.
+
+---
+
+## D35
+### Thread counts and seeds are pinned, because model selection was measuring the CPU
+**Date.** 2026-09-29 (Phase 7)
+
+**Decision.** Every model pins its thread count and its random seed in `configs/models.yaml`:
+`num_threads: 4` / `seed: 42` for LightGBM (plus `deterministic: true` and `force_row_wise: true`,
+which LightGBM's docs require together), `nthread: 4` / `random_state: 42` for XGBoost,
+`thread_count: 4` / `random_seed: 42` for CatBoost — replacing CatBoost's explicit
+`thread_count: -1`.
+
+**The bug.** Re-running Phase 5 flipped the shipped model from XGBoost to CatBoost with **no
+source change**. The investigation, in order, because each step ruled something out:
+
+1. Stashed every Phase 7 edit and ran the **committed** code — still CatBoost. Not my changes.
+2. `artifacts/tuned_params.json` matched the committed `reports/phase4_models.md` to four
+   decimals. Same hyperparameters.
+3. `reports/as_of_snapshots.md` regenerated byte-identical, and `reports/feature_matrix.md`
+   differed by exactly one line (the bundled snapshot month of D33). Same data, same matrix.
+4. `OMP_NUM_THREADS=4` and `=2` reproduced the committed numbers **exactly**: `xgboost 0.21520`,
+   blend delta `-0.00156`. The default, 10 threads, gives `catboost 0.21344`.
+
+All three libraries took every core, and their floating-point reductions are partitioned by thread
+count, so the model depended on how busy the machine happened to be. Phase 5 evidently ran while
+something else held cores — the summary notes a 305 MB download around then.
+
+**What it invalidates.** D31 said "ship XGBoost" on a margin of 0.0067 (0.21520 against CatBoost's
+0.20850). Thread count alone moves CatBoost by 0.005. **The margin was inside the noise, so D31
+was never a finding.** Under the pinned config with re-tuned hyperparameters the three models
+land at CatBoost 0.21604, LightGBM ~0.216 and XGBoost ~0.212 — a spread of about 0.004 on a
+calibration window of 13,624 rows. The honest statement is that the three are **indistinguishable
+on this data**, and any choice between them should be argued on grounds other than PR-AUC:
+inference cost, dependency weight, or how a library handles unseen categories.
+
+**Pinning the thread count, not deriving it from core count,** is what makes a run reproducible on
+a *different* machine. A 2-core CI runner oversubscribes 4 threads and is slower, but partitioning
+is by thread count, so it computes the same model. Verified: `OMP_NUM_THREADS=2` and `=10` now
+produce byte-identical output, because the library parameter overrides the environment.
+
+**Hyperparameters were re-tuned** under the pinned config, since the previous ones were selected
+by an experiment whose fold scores carried this noise. Re-tuning took 6 minutes — *faster* than the
+unpinned run (69s/78s/209s against 101s/124s/309s), so the reproducibility cost here is negative.
+
+**A latent second copy of the same hazard, fixed at the same time.** `ORDERS_QUERY` had no
+`ORDER BY`, and both Phase 4 and Phase 5 sorted with `np.argsort(kind="stable")` — which preserves
+the *input* order among ties. There are **522 tied `order_purchase_timestamp` values** in 96,203
+rows, and everything downstream slices positionally: `TimeSeriesSplit` cuts folds by index, and
+`fit_final_model` takes the last 15% as its early-stopping tail. Measured that Postgres's order is
+in fact stable today, so this caused **nothing** — but it would have, the first time anything
+rewrote that table. Now `ORDER BY order_purchase_timestamp, order_id` gives a total order, and one
+shared `build.window_slice` replaces two hand-rolled sorts, so there is one place to get it wrong
+instead of two.
+
+**The general lesson, which is the reusable part.** A result that is *stable across consecutive
+runs* can still be *irreproducible*, because the thing that varies is the environment, not a seed.
+Every determinism check in this project until now re-ran a command back-to-back on an idle machine,
+which is exactly the condition under which this bug is invisible. Checking reproducibility means
+varying the environment on purpose — thread count, core count, machine — not repeating the run.
+
+**Consequence for Phase 8.** CatBoost ships, so `requirements-api.txt` needs `catboost` after all,
+which is precisely the caveat that file already carried. Noted there, along with the operational
+coupling it implies: if the Phase 9 gate promotes a challenger shipping a different library, the
+API image must be rebuilt before the promotion can be served, so promotion is not purely a
+registry operation.
+
+---
+
+## D36
+### The API scores through the unwrapped predictor, and checks the signature once at startup
+**Date.** 2026-09-29 (Phase 7)
+
+**Decision.** `api/model_loader.py` loads the pyfunc, then calls
+`pyfunc.unwrap_python_model().score(frame)` rather than `pyfunc.predict(frame)`. To compensate for
+the schema enforcement that gives up, `assert_signature_matches_contract` compares the loaded
+signature against `RAW_INPUT_COLUMNS` **once, at startup**, and a mismatch stops the app booting.
+
+**Why.** §9 requires an unseen category to return 200 with a `warnings` field, so something must
+notice which values fell through to `__unknown__`. Preprocessing may not live in the API layer
+(invariant 4), and the obvious alternative — let the API call `transform` a second time to inspect
+the result — would double the dominant serving cost. Measured: a **1-row** `transform` takes ~45 ms
+and 1,000 rows take ~69 ms, because the cost is fixed overhead in the as-of snapshot join rather
+than per-row work. So the wrapper grew a `score()` returning `(predictions, warnings)` from one
+transform, and `predict()` delegates to it.
+
+**What was given up, and why the replacement is better placed.** `pyfunc.predict` enforces the
+logged input schema on every call. Enforcing it once at startup is cheaper and catches the same
+class of error earlier: a model whose contract has moved should refuse to boot, not return 500s
+under load. Request-level validation is not lost — Pydantic validates every field with types and
+bounds, which is strictly stronger than MLflow's schema check for malformed input, and the wrapper
+still rejects missing or computed columns itself. A test saves a model with a deliberately wrong
+signature and asserts `/health` reports 503 with "signature" in the detail.
+
+**Rejected.** Adding warnings to the pyfunc's *output* schema: it would change `OUTPUT_COLUMNS` and
+make every already-registered version's logged signature a lie, for a field that is a fact about a
+request rather than about a row.
+
+---
+
+## D37
+### The unseen-category warning says "not among the levels this model knows", not "never seen"
+**Date.** 2026-09-29 (Phase 7)
+
+**Decision.** The warning text names the model's *known levels* rather than claiming a value was
+absent from training.
+
+**Why — measured on all 96,203 real orders.** The champion reports unseen values for **3 seller
+states** (`AM`, `MA`, `PI`) and **43 product categories**. Those two numbers have different causes:
+
+- the states are genuinely absent from the fit window — too few sellers to appear;
+- the categories were mostly **present and deliberately capped**. `CATEGORY_CAP = 30` keeps the top
+  30 of 72, covering 95.80% of fit-window rows, so the other 42 collapse to `__unknown__` by design.
+
+Both routes end at the same sentinel, so the detection cannot separate them — but "was not seen
+during training" is *false* for most of the 43, and shipping a warning that overstates its case
+teaches an operator to ignore the channel. The cost of that would be the genuine drift signal in the
+seller-state case. Being accurate about what is known is achievable without extra machinery; being
+accurate about *why* would need the artifact to record which values it capped, which is not worth an
+artifact schema change for a message.
+
+**Consequence worth stating in the README:** `product_category` warns routinely and that is normal.
+A monitoring rule built on "any warning is drift" would fire on every batch.

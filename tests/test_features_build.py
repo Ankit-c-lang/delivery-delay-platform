@@ -146,6 +146,7 @@ def artifact(orders, snapshots) -> PreprocessingArtifact:
             {"state": ["SP"], "lat": [-23.55], "lng": [-46.63], "n_points": [100]}
         ),
         train_cutoff=orders["order_purchase_timestamp"].max(),
+        aggregates_through=pd.Timestamp("2018-08-01"),
     )
 
 
@@ -328,6 +329,7 @@ class TestFittedOnTrainOnly:
                 {"state": ["SP"], "lat": [-23.5], "lng": [-46.6], "n_points": [1]}
             ),
             train_cutoff=train["order_purchase_timestamp"].max(),
+            aggregates_through=pd.Timestamp("2018-08-01"),
         )
         assert art.numeric_medians["total_price"] == 100.0
 
@@ -353,6 +355,7 @@ class TestFittedOnTrainOnly:
                 zip_centroids=pd.DataFrame(),
                 state_centroids=pd.DataFrame(),
                 train_cutoff=pd.Timestamp("2017-12-31"),
+                aggregates_through=pd.Timestamp("2018-08-01"),
             )
 
     def test_winsor_bound_comes_from_the_training_quantile(self, artifact, orders):
@@ -424,6 +427,130 @@ class TestTransform:
         assert not training_path["seller_order_count_hist"].equals(
             serving_path["seller_order_count_hist"]
         )
+
+
+class TestTheBundledServingSnapshot:
+    """DECISIONS.md D33: which snapshot serving uses is a per-version contract, not "the newest".
+
+    The bug these tests pin: ``fit`` took the global maximum snapshot month, so a v1 artifact
+    whose fit window ends 2017-12-31 bundled the 2018-08 snapshot. Every served prediction then
+    used aggregates from eight months after the model was supposedly built — including outcomes
+    from inside the promotion evaluation window, which is the set that decides promotions.
+
+    The snapshots fixture spans 2017-05 .. 2018-08, so "the newest" and "the newest permitted"
+    are different months and a regression cannot pass by accident.
+    """
+
+    @staticmethod
+    def _fit(orders, snapshots, cutoff):
+        return PreprocessingArtifact.fit(
+            orders,
+            snapshots=snapshots,
+            zip_centroids=pd.DataFrame(
+                {
+                    "zip_code_prefix": ["01001"],
+                    "lat": [-23.55],
+                    "lng": [-46.63],
+                    "state": ["SP"],
+                    "n_points": [5],
+                }
+            ),
+            state_centroids=pd.DataFrame(
+                {"state": ["SP"], "lat": [-23.55], "lng": [-46.63], "n_points": [100]}
+            ),
+            train_cutoff=orders["order_purchase_timestamp"].max(),
+            aggregates_through=pd.Timestamp(cutoff),
+        )
+
+    def test_the_newest_snapshot_is_not_bundled_when_the_cutoff_forbids_it(self, orders, snapshots):
+        art = self._fit(orders, snapshots, "2018-02-28")
+        newest = max(
+            pd.Timestamp(m)
+            for frame in snapshots.values()
+            if not frame.empty
+            for m in pd.to_datetime(frame["snapshot_month"]).unique()
+        )
+        assert newest == pd.Timestamp("2018-08-01"), "fixture no longer spans past the cutoff"
+        assert art.latest_snapshot_month == pd.Timestamp("2018-03-01")
+
+    def test_the_cutoff_boundary_is_the_day_after_not_the_day_of(self, orders, snapshots):
+        """``delivered < M`` means the 2018-03-01 snapshot stops at 2018-02-28 inclusive.
+
+        So a cutoff of 2018-02-28 admits M=2018-03-01, and a cutoff one day earlier does not.
+        Off by one in either direction is a real error: looser bundles outcomes the version
+        must never see, tighter throws away a month of legitimate history.
+        """
+        assert self._fit(orders, snapshots, "2018-02-28").latest_snapshot_month == pd.Timestamp(
+            "2018-03-01"
+        )
+        assert self._fit(orders, snapshots, "2018-02-27").latest_snapshot_month == pd.Timestamp(
+            "2018-02-01"
+        )
+
+    def test_a_cutoff_before_every_snapshot_is_refused_rather_than_bundling_nothing(
+        self, orders, snapshots
+    ):
+        with pytest.raises(ValueError, match="no snapshot month falls on or before"):
+            self._fit(orders, snapshots, "2016-01-01")
+
+    def test_the_cutoff_is_recorded_on_the_artifact(self, orders, snapshots):
+        art = self._fit(orders, snapshots, "2018-02-28")
+        assert art.metadata["aggregates_through"] == "2018-02-28"
+
+    def test_the_cutoff_changes_serving_only_and_leaves_the_training_matrix_identical(
+        self, orders, snapshots
+    ):
+        """The fix must not touch training: that path joins per purchase month already.
+
+        If this test ever fails, the cutoff has leaked into matrix construction and every
+        Phase 4-5 number would silently move.
+        """
+        tight = self._fit(orders, snapshots, "2018-02-28")
+        loose = self._fit(orders, snapshots, "2018-08-31")
+        assert tight.latest_snapshot_month != loose.latest_snapshot_month
+        pd.testing.assert_frame_equal(
+            tight.transform_with_snapshots(orders, snapshots),
+            loose.transform_with_snapshots(orders, snapshots),
+        )
+
+    def test_serving_really_does_differ_between_the_two_cutoffs(self, orders, snapshots):
+        """The counterpart: the bundled month is not cosmetic.
+
+        Measured on the real data, bundling 2018-08 instead of 2018-03 moved a history feature
+        by a mean of 4,224 orders on every single row. A test that only asserted the month
+        changed would not have caught the original bug's consequence.
+        """
+        # The shared snapshots fixture resolves all its outcomes by 2017-05, so every later
+        # month is a copy and the cutoff would look cosmetic. Build history that keeps
+        # accumulating instead, which is how the real table behaves.
+        n = 400
+        resolved = pd.DataFrame(
+            {
+                "seller_id": [f"s{i % 5:03d}" for i in range(n)],
+                "seller_state": ["SP", "RJ"] * (n // 2),
+                "route": ["SP->SP", "RJ->RJ"] * (n // 2),
+                "customer_state": ["SP", "RJ", "MG", "BA"] * (n // 4),
+                "dominant_category": ["cama_mesa_banho", "beleza_saude"] * (n // 2),
+                "order_delivered_customer_date": pd.to_datetime("2017-04-01")
+                + pd.to_timedelta(np.arange(n), unit="D"),
+                "is_late": [True, False, False, False] * (n // 4),
+                "delivery_days": np.full(n, 10.0),
+                "handling_days": np.full(n, 2.0),
+            }
+        )
+        months = list(pd.date_range("2017-05-01", "2018-08-01", freq="MS"))
+        growing = build_all_snapshots(resolved, months)
+
+        tight = self._fit(orders, growing, "2018-02-28")
+        loose = self._fit(orders, growing, "2018-08-31")
+        history = [c for c in FEATURE_NAMES if c.endswith("_hist")]
+        served_tight = tight.transform(orders)[history]
+        served_loose = loose.transform(orders)[history]
+        assert not served_tight.equals(served_loose)
+        # Concretely: the later snapshot has seen strictly more orders.
+        assert (
+            served_loose["seller_order_count_hist"] > served_tight["seller_order_count_hist"]
+        ).all()
 
 
 class TestPersistence:
@@ -554,9 +681,25 @@ class TestAgainstTheRealData:
         assert len(built["labels"]) == len(built["matrix"])
         assert float(built["labels"].mean()) == pytest.approx(0.0679, abs=1e-3)
 
-    def test_the_bundled_snapshot_is_the_latest_month(self, built):
+    def test_the_bundled_snapshot_is_the_newest_the_version_is_allowed(self, built):
+        """Was ``test_the_bundled_snapshot_is_the_latest_month``, asserting 2018-08-01.
+
+        That test passed for two phases while being wrong: it pinned the mechanism ("the newest
+        month is bundled") instead of the contract ("the newest month this version may see").
+        v1's aggregates_through is 2018-02-28, so the answer is 2018-03-01 — the snapshot whose
+        ``delivered < M`` filter stops exactly at the cutoff (DECISIONS.md D33).
+        """
+        from src.splits import promotion_evaluation_starts_on, version_splits
+
         artifact = built["artifact"]
-        assert artifact.latest_snapshot_month == pd.Timestamp("2018-08-01")
+        splits = version_splits("v1")
+        permitted = pd.Timestamp(splits.aggregates_through) + pd.Timedelta(days=1)
+
+        assert artifact.latest_snapshot_month == permitted == pd.Timestamp("2018-03-01")
+        assert artifact.metadata["aggregates_through"] == str(splits.aggregates_through)
+        # The whole point: serving cannot reach into the window that decides promotions.
+        assert artifact.latest_snapshot_month <= pd.Timestamp(promotion_evaluation_starts_on())
+
         for spec in ENTITIES:
             frame = artifact.latest_snapshots[spec.table]
             assert (frame["snapshot_month"] == artifact.latest_snapshot_month).all()

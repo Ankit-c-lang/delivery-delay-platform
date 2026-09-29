@@ -8,7 +8,7 @@ PY := .venv/bin/python
 COMPOSE := docker compose -f docker-compose.yml
 
 .DEFAULT_GOAL := help
-.PHONY: help lint format test test-unit up down stop ps logs psql health check-data load-raw \
+.PHONY: help lint format test test-unit up down stop ps logs psql health check-data load-raw serve bench \
         build-orders etl snapshots features baselines tune decide train registry
 
 help: ## List available targets
@@ -71,7 +71,7 @@ etl: check-data load-raw build-orders ## The full ETL chain, in order
 snapshots: ## Build the as-of monthly aggregate snapshots (PLAN.md 4.5, 18 A1)
 	$(PY) -m src.features.history
 
-features: snapshots ## Fit the preprocessing artifact and build the 39-feature matrix
+features: snapshots ## Fit the preprocessing artifact and build the 38-feature matrix
 	$(PY) -m src.features.build
 
 # --- Phase 4 -------------------------------------------------------------------
@@ -94,3 +94,13 @@ train: ## Full versioned MLflow run: nested children, pyfunc, registry. V=v1 by 
 
 registry: ## Show the registered versions and their aliases
 	$(PY) -m src.training.train --show-registry
+
+# --- Phase 7 -------------------------------------------------------------------
+
+serve: ## Run the API on API_PORT (8001 — 8000 belongs to realtime-fraud-detection)
+	@API_PORT=$${API_PORT:-8001}; \
+	echo "serving on http://127.0.0.1:$$API_PORT (docs at /docs)"; \
+	$(PY) -m uvicorn api.main:app --host 127.0.0.1 --port $$API_PORT
+
+bench: ## p50/p95 for single and batch-100. URL=http://127.0.0.1:8001 to hit a running service.
+	$(PY) -m scripts.benchmark_latency $(if $(URL),--url $(URL),) $(if $(N),--iterations $(N),)

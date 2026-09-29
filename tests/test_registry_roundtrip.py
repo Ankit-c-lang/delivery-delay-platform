@@ -18,18 +18,16 @@ from typing import ClassVar
 import numpy as np
 import pandas as pd
 import pytest
+from tests.fixtures.raw_orders import fitted_bundle, serving_records
 
-from src.features.artifact import PreprocessingArtifact
-from src.features.history import build_all_snapshots
 from src.registry.pyfunc_wrapper import (
+    COMPUTED_COLUMNS,
     HISTORY_COLUMNS,
     OUTPUT_COLUMNS,
     RAW_INPUT_COLUMNS,
     DelayPredictor,
     raw_input_example,
 )
-
-N = 400
 
 
 @pytest.fixture(autouse=True)
@@ -60,108 +58,17 @@ def _isolate_tracking_uri():
             os.environ["MLFLOW_TRACKING_URI"] = original_env
 
 
-def synthetic_orders(n: int = N, seed: int = 7) -> pd.DataFrame:
-    """Raw order records carrying every column the wrapper requires."""
-    rng = np.random.default_rng(seed)
-    purchased = pd.Timestamp("2017-06-01") + pd.to_timedelta(np.arange(n) * 6, unit="h")
-    states = np.array(["SP", "RJ", "MG", "BA"])[np.arange(n) % 4]
-    frame = pd.DataFrame(
-        {
-            "order_id": [f"o{i:05d}" for i in range(n)],
-            "order_purchase_timestamp": purchased,
-            "purchase_month": purchased.to_period("M").to_timestamp(),
-            "promised_days": rng.integers(5, 40, n),
-            "days_to_shipping_limit": rng.gamma(4.0, 1.5, n),
-            "customer_state": states,
-            "seller_state": np.where(np.arange(n) % 2 == 0, "SP", "RJ"),
-            "customer_zip_code_prefix": np.array(["01001", "20010", "30110", "40010"])[
-                np.arange(n) % 4
-            ],
-            "customer_seller_distance_km": rng.uniform(5, 1800, n),
-            "n_seller_states": np.ones(n, dtype=int),
-            "n_items": rng.integers(1, 4, n),
-            "n_distinct_products": np.ones(n, dtype=int),
-            "n_distinct_sellers": np.ones(n, dtype=int),
-            "total_price": rng.uniform(20, 900, n),
-            "total_freight": rng.uniform(5, 90, n),
-            "total_weight_g": rng.uniform(100, 9000, n),
-            "max_item_weight_g": rng.uniform(100, 9000, n),
-            "total_volume_cm3": rng.uniform(500, 40000, n),
-            "max_item_volume_cm3": rng.uniform(500, 40000, n),
-            "dominant_category": np.array(["cama_mesa_banho", "beleza_saude", None])[
-                np.arange(n) % 3
-            ],
-            "dominant_payment_type": np.array(["credit_card", "boleto"])[np.arange(n) % 2],
-            "max_installments": rng.integers(1, 10, n),
-            "total_payment_value": rng.uniform(25, 950, n),
-            "n_payment_methods": np.ones(n, dtype=int),
-            "seller_id": [f"s{i % 12:03d}" for i in range(n)],
-            "route": np.where(np.arange(n) % 2 == 0, "SP->SP", "RJ->RJ"),
-        }
-    )
-    return frame
-
-
-def synthetic_resolved(orders: pd.DataFrame, seed: int = 8) -> pd.DataFrame:
-    """Resolved history for the snapshot builder, all delivered before the orders' months."""
-    rng = np.random.default_rng(seed)
-    n = len(orders)
-    return pd.DataFrame(
-        {
-            "seller_id": orders["seller_id"],
-            "seller_state": orders["seller_state"],
-            "route": orders["route"],
-            "customer_state": orders["customer_state"],
-            "dominant_category": orders["dominant_category"],
-            "order_delivered_customer_date": pd.Timestamp("2017-03-01")
-            + pd.to_timedelta(rng.integers(0, 40, n), unit="D"),
-            "is_late": rng.random(n) < 0.08,
-            "delivery_days": rng.uniform(3, 40, n),
-            "handling_days": rng.uniform(0.5, 8, n),
-        }
-    )
-
-
 @pytest.fixture(scope="module")
 def wrapper_and_data():
-    """A fitted artifact, a small real model and a wrapped predictor."""
-    from lightgbm import LGBMClassifier
-    from sklearn.isotonic import IsotonicRegression
+    """A fitted artifact, a small real model and a wrapped predictor.
 
-    from src.features.history import attach_history
-
-    orders = synthetic_orders()
-    resolved = synthetic_resolved(orders)
-    months = list(pd.date_range("2017-04-01", "2017-08-01", freq="MS"))
-    snapshots = build_all_snapshots(resolved, months)
-
-    artifact = PreprocessingArtifact.fit(
-        attach_history(orders, snapshots),
-        snapshots=snapshots,
-        zip_centroids=pd.DataFrame(
-            {
-                "zip_code_prefix": ["01001"],
-                "lat": [-23.55],
-                "lng": [-46.63],
-                "state": ["SP"],
-                "n_points": [4],
-            }
-        ),
-        state_centroids=pd.DataFrame(
-            {"state": ["SP"], "lat": [-23.55], "lng": [-46.63], "n_points": [9]}
-        ),
-        train_cutoff=orders["order_purchase_timestamp"].max(),
-    )
-
-    features = artifact.transform_with_snapshots(orders, snapshots)
-    rng = np.random.default_rng(3)
-    y = (rng.random(len(orders)) < 0.1).astype(int)
-    model = LGBMClassifier(n_estimators=10, num_leaves=7, verbosity=-1).fit(features, y)
-
-    raw_scores = model.predict_proba(features)[:, 1]
-    calibrator = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds="clip").fit(raw_scores, y)
-    decided = artifact.with_decision(calibrator=calibrator, threshold=0.3)
-    return DelayPredictor(decided, model, "lightgbm"), orders
+    Built by :func:`tests.fixtures.raw_orders.fitted_bundle`. The synthetic-order generators
+    moved there in Phase 7 so the parity test could use the same definition — PLAN.md §13
+    requires parity to draw its rows from ``tests/fixtures/`` (§18 A3), and two copies of "a
+    synthetic order" would let the two tests drift apart while both stayed green.
+    """
+    bundle = fitted_bundle()
+    return bundle["predictor"], bundle["orders"]
 
 
 class TestTheWrapperContract:
@@ -198,13 +105,27 @@ class TestTheWrapperContract:
         wrapper, orders = wrapper_and_data
         poisoned = orders.loc[:, list(RAW_INPUT_COLUMNS)].copy()
         poisoned["seller_late_rate_hist"] = 0.99
-        with pytest.raises(ValueError, match="history columns must not be supplied"):
+        with pytest.raises(ValueError, match="computed, not supplied"):
             wrapper.predict(None, poisoned)
 
     def test_every_history_column_is_covered_by_the_guard(self):
         assert len(HISTORY_COLUMNS) == 15
         assert "seller_is_new" in HISTORY_COLUMNS
         assert "route_late_rate_hist" in HISTORY_COLUMNS
+
+    def test_purchase_month_is_computed_not_requested(self):
+        """D34: serving forces it to the bundled snapshot month, so accepting it would be a lie."""
+        assert "purchase_month" in COMPUTED_COLUMNS
+        assert "purchase_month" not in RAW_INPUT_COLUMNS
+        expected = HISTORY_COLUMNS | {"purchase_month"}
+        assert expected == COMPUTED_COLUMNS
+
+    def test_a_supplied_purchase_month_is_refused(self, wrapper_and_data):
+        wrapper, orders = wrapper_and_data
+        frame = serving_records(orders).head(3)
+        frame["purchase_month"] = pd.Timestamp("2017-01-01")
+        with pytest.raises(ValueError, match="purchase_month"):
+            wrapper.predict(None, frame)
 
     def test_a_null_in_a_nullable_column_is_accepted(self, wrapper_and_data):
         """`dominant_category` is null for 1,330 real orders, so serving must tolerate it

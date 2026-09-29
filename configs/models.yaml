@@ -7,6 +7,14 @@
 #
 # Optuna runs with n_jobs=1 and the boosting library gets the threads. Nested parallelism
 # (Optuna workers x library threads) thrashes this CPU and makes every timing meaningless.
+#
+# EVERY MODEL PINS ITS THREAD COUNT AND ITS SEED. This is not tidiness (DECISIONS.md D35).
+# Left unpinned, all three libraries take every core, and their floating-point reductions are
+# partitioned by thread count — so the same code on the same data produced a different model
+# depending on how busy the machine was. Measured: at 10 threads the best single model is
+# catboost at 0.21344; at 2 or 4 threads it is xgboost at 0.21520. The shipped-model decision
+# was being made by CPU availability. Pinning the THREAD COUNT rather than deriving it from
+# core count is what makes a run reproducible on another machine, including a 2-core CI runner.
 
 seed: 42
 
@@ -32,6 +40,12 @@ models:
       verbosity: -1
       n_estimators: 2000
       early_stopping_rounds: 50
+      num_threads: 4
+      seed: 42
+      # LightGBM's own reproducibility switch. Its docs require one of force_row_wise /
+      # force_col_wise alongside it, or it warns and ignores the request.
+      deterministic: true
+      force_row_wise: true
     search:
       learning_rate:      {type: float, low: 0.01,  high: 0.2,  log: true}
       num_leaves:         {type: int,   low: 15,    high: 255,  log: true}
@@ -51,6 +65,8 @@ models:
       enable_categorical: true
       n_estimators: 2000
       early_stopping_rounds: 50
+      nthread: 4
+      random_state: 42
     search:
       learning_rate:      {type: float, low: 0.01,  high: 0.2,  log: true}
       max_depth:          {type: int,   low: 3,     high: 10}
@@ -69,7 +85,8 @@ models:
       iterations: 1500          # capped, per §6.4
       od_type: Iter
       od_wait: 50
-      thread_count: -1
+      thread_count: 4          # was -1 (every core), which made runs unreproducible
+      random_seed: 42
       verbose: false
       allow_writing_files: false
     search:

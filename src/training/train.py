@@ -516,6 +516,10 @@ def describe_registry() -> list[dict[str, Any]]:
                 "evaluation_pr_auc": version.tags.get("evaluation_pr_auc", "?"),
                 "git_sha": (version.tags.get("git_sha") or "?")[:8],
                 "alias_reason": version.tags.get("alias_reason", "?"),
+                # A withdrawn version keeps its metrics, so without this the listing shows a
+                # plausible-looking candidate that must never be deployed (DECISIONS.md D33).
+                "status": version.tags.get("status", "active"),
+                "withdrawn_reason": version.tags.get("withdrawn_reason", ""),
             }
         )
     return rows
@@ -537,6 +541,8 @@ def print_registry() -> None:
         )
         print(f"        train={row['training_window']}  eval_pr_auc={row['evaluation_pr_auc']}")
         print(f"        alias: {row['alias_reason']}")
+        if row["status"] != "active":
+            print(f"        STATUS: {row['status'].upper()} — {row['withdrawn_reason']}")
 
 
 def main(argv: list[str] | None = None) -> int:

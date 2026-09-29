@@ -59,8 +59,11 @@ module does not exist yet is not written (DECISIONS.md D15).
 - `make train V=v1` (full MLflow run: nested children, pyfunc, registry — ~22 s) ·
   `make registry` (versions and aliases)
 
+- `make serve` (API on **8001**, docs at `/docs`) · `make bench` (p50/p95; `URL=` to hit a
+  running service, `N=` iterations)
+
 **Arrive with their phase:**
-- `promote` (9) · `make serve | bench` (7-8)
+- `promote` (9)
 - `make bootstrap` (8) — the ordered first-run sequence (PLAN §18 A5). **Required before
   `docker compose up` on a clean machine**, because the API resolves `@champion` at startup
   and the registry starts empty.
@@ -117,6 +120,18 @@ MLflow 3.16.1, pandera 0.33.1. Two API notes that cost time if forgotten: pander
     artifact. Training uses `transform_with_snapshots`, serving uses `transform`; the two
     names are the §18 A6 asymmetry made visible (DECISIONS.md D23). The matrix is **not**
     persisted as a table — recompute it (D24).
+14. **Reproducibility is checked by VARYING the environment, never by repeating a run.**
+    Every model pins its thread count and seed in `configs/models.yaml`; unpinned, all three
+    libraries take every core and their FP reductions are partitioned by thread count, which
+    silently decided which model shipped (DECISIONS.md D35). A result that is stable across
+    consecutive runs on an idle machine can still be irreproducible. Vary `OMP_NUM_THREADS`.
+15. **Row order is part of the contract.** `ORDERS_QUERY` sorts by
+    `(order_purchase_timestamp, order_id)` and `build.window_slice` is the only place a window's
+    rows are ordered. 522 timestamps are tied, and `TimeSeriesSplit` and `fit_final_model` both
+    slice **positionally**, so an arbitrary tie order changes the model.
+16. **The bundled serving snapshot is bounded by the version's `aggregates_through`**, not by
+    "the newest month in the database" (D33). v1 bundles 2018-03-01. `PreprocessingArtifact.fit`
+    requires the bound as an argument, so it cannot be forgotten.
 
 ## Out of scope (do not add)
 Airflow, Prefect, Dagster, Kafka, Kubernetes, Terraform, Spark, a feature store, a vector
@@ -148,42 +163,73 @@ splitting, Streamlit. If a change isn't in `PLAN.md`, ask before writing it.
 - Commit or push only when asked.
 
 ## Current phase
-**Phases 0-6 COMPLETE.** 326 tests pass. `delivery_delay_classifier` **v1 is registered with
-`@champion`** and loads in a fresh Python process by alias alone. `make train` produces a parent
-run plus five nested children and a pyfunc that bundles artifact + model + calibrator +
-threshold (D32).
+**Phases 0-6 COMPLETE, and Phase 6's output was rebuilt in Phase 7 after two real bugs.**
+`delivery_delay_classifier` **v2 is `@champion`** and loads in a fresh Python process by alias
+alone. v1 is tagged `withdrawn: do not deploy` and `make registry` prints that status.
 
-Phase 5 results, unchanged: **Ship XGBoost alone** (D31). The blend is a genuine
-0.77/0.23 CatBoost/XGBoost mix and is still **worse** on PR-AUC (delta −0.00156), because weights
-are fitted on log-loss while PR-AUC measures ranking. Calibration improves held-out Brier
-0.0853 -> 0.0841. Threshold **0.21** under an assumed 5:1 FN:FP ratio: 36.3% recall at a 13.7%
-flag rate, 25.6% precision.
+**Two corrections that changed the headline results (read D33 and D35 before trusting any older
+number in this file or in `reports/`):**
+
+- **D33** — the bundled *serving* snapshot ignored the version's `aggregates_through` and took the
+  newest month in the database, so v1's serving path used 2018-08 aggregates against a 2017-12-31
+  train cutoff, reaching into the promotion evaluation window. v1 now bundles **2018-03-01**.
+  Training was never affected: `transform_with_snapshots` joins per purchase month.
+- **D35** — thread counts were unpinned, so floating-point reduction order (and therefore the
+  winning model) depended on machine load. **D31's "ship XGBoost" was noise**: its 0.0067 margin
+  was smaller than the 0.005 that thread count alone moves CatBoost. Threads and seeds are now
+  pinned, hyperparameters were re-tuned, and runs are byte-identical across `OMP_NUM_THREADS`.
+
+**Current results, reproducible.** Ship **CatBoost** alone: cal-window PR-AUC **0.21604**, blend
+0.21924 (**delta +0.00320**, under the 0.005 bar). Threshold **0.1792** at an assumed 5:1 FN:FP
+ratio: **42.5% recall at a 17.2% flag rate, 24.0% precision**. CV PR-AUC lightgbm 0.15349,
+catboost 0.15209, xgboost 0.14666, against a logistic baseline of 0.13545.
+
+**Treat the three GBDTs as indistinguishable.** They span ~0.004 on a 13,624-row calibration
+window. Choose between them on inference cost, dependency weight or unseen-category handling —
+not on PR-AUC. CatBoost shipping means `requirements-api.txt` carries `catboost`, and that file
+notes the coupling: promoting a challenger that ships a different library needs an image rebuild.
 
 `raw` holds 9 tables / 1,550,922 rows; `features.orders_analytical` holds 96,203 rows at a 6.79%
-`is_late` rate; six snapshot tables hold 34,427 rows; the **38-feature** matrix and a fitted
-`PreprocessingArtifact` build in ~4 s via `make features`; `src/splits.py` owns every date
-boundary and locks the promotion evaluation window.
+`is_late` rate; six snapshot tables hold 34,427 rows across 2017-02..2018-08; the **38-feature**
+matrix and a fitted `PreprocessingArtifact` build in ~5 s via `make features`; `src/splits.py` owns
+every date boundary and locks the promotion evaluation window.
 
-**38, not §5's 39: `purchase_month` was dropped** (D29). It was #1 by SHAP and could not have been
-learned — no calibration window shares a calendar month with its fit window, and months 9-12 occur
-in only one year, so a month effect is confounded with that year's operations. Dropping it improved
-cross-validated PR-AUC for all three GBDTs. The surviving timing features recur often enough to be
-estimable: 87 weeks for day-of-week against 1.67 years for month-of-year.
+**38, not §5's 39: `purchase_month` was dropped** (D29) — no calibration window shares a calendar
+month with its fit window, and months 9-12 occur in only one year. **It is also no longer a request
+field** (D34): serving forces it to the bundled snapshot month, so the API contract is **24
+columns**, not 25, and supplying it is refused.
 
-**Next: Phase 7 — FastAPI and the parity test** (~4 h). **Read §18 A3 and A6 first.**
-- The parity test uses `tests/fixtures/`, **never** the 2018-05 → 08 window (§18 A3). That
-  window raises unless unlocked by the gate, so the guard is enforced, not advisory.
-- Parity is scoped to **one fixed artifact**: same raw record + same artifact -> same
-  probability within 1e-6. Snapshot selection is outside its scope (§18 A6).
-- The API layer contains **no preprocessing** (invariant 4). It resolves
-  `models:/delivery_delay_classifier@champion`, passes raw order records to the pyfunc, and
-  returns what comes back. `src/registry/pyfunc_wrapper.py::RAW_INPUT_COLUMNS` is the request
-  contract — 25 columns, and history columns are **rejected** if a caller supplies them.
-- XGBoost ships, so `requirements-api.txt` needs no `catboost` — but `xgboost` pulls the 305 MB
-  CUDA library D14 flagged, which makes `xgboost-cpu` directly relevant to Phase 8.
+**Phase 7 COMPLETE.** 378 tests pass, zero skips. `api/` is §9's structure; the model loads once in an
+`asynccontextmanager` lifespan; `/health` answers **503** when it did not load and a bad
+`MODEL_URI` does not kill the process; `MODEL_URI` resolves as alias, pinned version or local path
+(the last is what lets the API tests run in CI with no registry). **Parity is green at 1e-6**, and
+`tests/test_parity.py` carries a guard class so it cannot pass vacuously — rows are taken on a
+stride, not `head(20)`, and the fixture calibrator is fitted out of sample, because in-sample
+scores collapse isotonic into a two-step function. Invariant 4 is enforced by **AST import
+inspection**: nothing under `api/` may import `src.features` or `src.training`.
 
-The `realtime-fraud-detection` stack is currently **stopped** to free RAM for tuning. Restart it
-with `docker start realtime-fraud-detection-redis-1 realtime-fraud-detection-scorer-1
+**Measured latency, real HTTP:** single p50 **52.64 ms** / p95 59.98; batch-100 p50 **54.91 ms** /
+p95 75.07; **0.549 ms per record in a batch — 96x cheaper**. Nearly the whole bill is fixed
+overhead in the as-of snapshot join (1-row transform ~45 ms against ~69 ms for 1,000), not the
+model, which is sub-millisecond. Optimise there if it ever matters.
+
+**Operational note for Phase 8:** running the champion over all 96,203 real orders warns on 3
+seller states (`AM`, `MA`, `PI`) and 43 product categories. The categories are **not drift** —
+`CATEGORY_CAP = 30` collapses the other 42 by design — which is why the warning says "not among
+the levels this model was trained on" rather than "never seen".
+
+**Next: Phase 8 — Docker and Compose** (~3 h). **Read §18 A5 first.**
+- `make bootstrap` is **required before `docker compose up`** on a clean machine: the API resolves
+  `@champion` at startup and a fresh registry has none.
+- `requirements-api.txt` now carries **catboost**, because CatBoost ships (D35). Verify the pyfunc
+  loads under `mlflow-skinny` and measure the image size, which is the justification that file asks
+  for. `xgboost` and `lightgbm` were removed — but read the coupling note in that file first.
+- `httpx2`: starlette's TestClient warns that using it with `httpx` is deprecated. A new dependency
+  needs approval, so it is **not** installed; it will become an error when starlette removes the
+  shim.
+
+The `realtime-fraud-detection` stack is currently **stopped** to free RAM. Restart it with
+`docker start realtime-fraud-detection-redis-1 realtime-fraud-detection-scorer-1
 realtime-fraud-detection-graph-refresh-1` when this project is not training.
 
 Do not implement future phases. `PROGRESS.md` carries the detail. Two findings govern later

@@ -12,9 +12,9 @@ Training rows: **36,174** · base rate **0.0585** · `TimeSeriesSplit(n_splits=4
 |---|---:|---:|---:|---:|
 | _majority_class_ | 0.06559 | 1.12x | - | - |
 | _logistic_regression_ | 0.13545 | 2.32x | - | - |
-| **lightgbm** | **0.15331** | 2.62x | 40/40 | 101s |
-| **catboost** | **0.14997** | 2.56x | 20/20 | 309s |
-| **xgboost** | **0.14694** | 2.51x | 40/40 | 124s |
+| **lightgbm** | **0.15349** | 2.63x | 40/40 | 69s |
+| **catboost** | **0.15209** | 2.60x | 20/20 | 209s |
+| **xgboost** | **0.14666** | 2.51x | 40/40 | 78s |
 
 ## Read the per-fold scores against the per-fold base rate
 
@@ -25,10 +25,10 @@ fold PR-AUC is +0.80**. Lift (PR-AUC / base rate) is the fold-comparable number.
 
 | Fold | Val rows | Base rate | lightgbm PR-AUC / lift | xgboost PR-AUC / lift | catboost PR-AUC / lift |
 |---|---:|---:|---:|---:|---:|
-| 1 | 7,234 | 0.0282 | 0.0706 / 2.50x | 0.0615 / 2.18x | 0.0538 / 1.91x |
-| 2 | 7,234 | 0.0417 | 0.1114 / 2.67x | 0.0917 / 2.20x | 0.1048 / 2.51x |
-| 3 | 7,234 | 0.0959 | 0.1453 / 1.51x | 0.1482 / 1.54x | 0.1485 / 1.55x |
-| 4 | 7,234 | 0.0965 | 0.2860 / 2.96x | 0.2864 / 2.97x | 0.2928 / 3.03x |
+| 1 | 7,234 | 0.0282 | 0.0694 / 2.46x | 0.0632 / 2.24x | 0.0477 / 1.69x |
+| 2 | 7,234 | 0.0417 | 0.0975 / 2.34x | 0.0965 / 2.31x | 0.1104 / 2.65x |
+| 3 | 7,234 | 0.0959 | 0.1524 / 1.59x | 0.1371 / 1.43x | 0.1537 / 1.60x |
+| 4 | 7,234 | 0.0965 | 0.2947 / 3.05x | 0.2898 / 3.00x | 0.2965 / 3.07x |
 
 **The model is weakest exactly when it matters most.** Fold 3 covers November
 2017, the Black Friday spike: it has the highest base rate and the *lowest* lift.
@@ -44,45 +44,45 @@ deployed forward in time, but it is a choice, not a neutral average.
 
 ## Best hyperparameters
 
-**lightgbm** — per-fold PR-AUC [0.0705504696639688, 0.11138712259249302, 0.1453008529725674, 0.28601272777813946]
+**lightgbm** — per-fold PR-AUC [0.06936266855134854, 0.09751927312818703, 0.1523585103567609, 0.2947158254569404]
 
 ```yaml
-bagging_fraction: 0.8590444554652396
-bagging_freq: 3
-feature_fraction: 0.5298842187301288
-lambda_l2: 0.564733304605502
-learning_rate: 0.010975616252039534
-min_child_samples: 8
+bagging_fraction: 0.9059627951649499
+bagging_freq: 4
+feature_fraction: 0.5700320202092076
+lambda_l2: 0.4266065483830374
+learning_rate: 0.03527438912803349
+min_child_samples: 18
 num_leaves: 19
 ```
 
-**xgboost** — per-fold PR-AUC [0.06151884730800666, 0.09168811341090283, 0.1481784571110642, 0.2863687801384002]
+**xgboost** — per-fold PR-AUC [0.06324251306847184, 0.09648626085402422, 0.13709781759776252, 0.28981324691033034]
 
 ```yaml
-colsample_bytree: 0.5862619542805796
-learning_rate: 0.013270744671656502
-max_depth: 8
-min_child_weight: 4.01300334117529
-reg_lambda: 3.9289372744175166
-subsample: 0.794373360860246
+colsample_bytree: 0.5339821961256953
+learning_rate: 0.01833612490084701
+max_depth: 9
+min_child_weight: 21.345744346754877
+reg_lambda: 0.4145341166619927
+subsample: 0.9704158517497771
 ```
 
-**catboost** — per-fold PR-AUC [0.05379690161257161, 0.10476256895445435, 0.14850745213854874, 0.29280250372693245]
+**catboost** — per-fold PR-AUC [0.04771888176492625, 0.11043686997959991, 0.15373425397983484, 0.29647627968644974]
 
 ```yaml
-bagging_temperature: 0.01570324926967833
+bagging_temperature: 0.02639034397669773
 depth: 6
-l2_leaf_reg: 5.499415228774075
-learning_rate: 0.0881173692505046
-random_strength: 2.7731320015939183
+l2_leaf_reg: 11.898026329368589
+learning_rate: 0.1098816559059583
+random_strength: 0.01272104172328142
 ```
 
 ## `scale_pos_weight`, tested rather than assumed (§6.4)
 
 LightGBM at its tuned parameters, refitted with `scale_pos_weight=16.1`:
 
-- PR-AUC **0.14506** against 0.15331 unweighted (**-0.00826**)
-- Per fold: [0.06153, 0.08657, 0.14499, 0.28713]
+- PR-AUC **0.14324** against 0.15349 unweighted (**-0.01025**)
+- Per fold: [0.05354, 0.09251, 0.14276, 0.28413]
 
 No resampling anywhere. Train on raw probabilities, calibrate in Phase 5, then
 tune the threshold — reweighting the loss moves the probabilities without

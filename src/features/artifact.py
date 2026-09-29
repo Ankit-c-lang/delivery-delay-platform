@@ -115,6 +115,7 @@ class PreprocessingArtifact:
         zip_centroids: pd.DataFrame,
         state_centroids: pd.DataFrame,
         train_cutoff: pd.Timestamp,
+        aggregates_through: Any,
     ) -> PreprocessingArtifact:
         """Fit every parameter on training rows only.
 
@@ -127,6 +128,12 @@ class PreprocessingArtifact:
             zip_centroids: Zip-prefix centroid table, bundled for serving.
             state_centroids: State centroid table, bundled as the geo fallback.
             train_cutoff: Last purchase timestamp included in training.
+            aggregates_through: Last date whose resolved outcomes may enter this version's
+                as-of snapshots, from ``configs/splits.yaml`` via
+                :attr:`src.splits.VersionSplits.aggregates_through`. This bounds which
+                snapshot may be **bundled for serving**; it does not restrict the snapshots
+                used to build the training matrix, which join per purchase month and are
+                leakage-safe by construction.
 
         Returns:
             A fitted, immutable artifact.
@@ -161,9 +168,45 @@ class PreprocessingArtifact:
                 "probably too narrow to contain any observation of them"
             )
 
-        latest_month = max(
-            frame["snapshot_month"].max() for frame in snapshots.values() if not frame.empty
+        # WHICH SNAPSHOT GETS BUNDLED, AND WHY THE OFF-BY-ONE IS LOAD-BEARING.
+        #
+        # Taking the global maximum here was a real bug (DECISIONS.md D33): a v1 artifact whose
+        # train_cutoff is 2017-12-31 bundled the 2018-08 snapshot, so every served prediction
+        # used aggregates from eight months after the model was supposedly built, including
+        # outcomes from inside the promotion evaluation window.
+        #
+        # `build_snapshots` filters on ``delivered < M``, so snapshot month M contains only
+        # outcomes resolved strictly before M. M is therefore permissible for a version iff
+        # every outcome in it resolved on or before ``aggregates_through`` — that is, iff
+        # ``M <= aggregates_through + 1 day``. Both directions of the off-by-one are errors:
+        # looser bundles outcomes the version must not see, tighter discards a month of
+        # legitimate history.
+        bundling_cutoff = pd.Timestamp(aggregates_through) + pd.Timedelta(days=1)
+        available = sorted(
+            {
+                pd.Timestamp(month)
+                for frame in snapshots.values()
+                if not frame.empty
+                for month in pd.to_datetime(frame["snapshot_month"]).unique()
+            }
         )
+        permissible = [month for month in available if month <= bundling_cutoff]
+        if not permissible:
+            span = f"{available[0].date()}..{available[-1].date()}" if available else "none built"
+            raise ValueError(
+                f"no snapshot month falls on or before {bundling_cutoff.date()} "
+                f"(aggregates_through={pd.Timestamp(aggregates_through).date()}); "
+                f"available months: {span}. Serving would have no as-of history to bundle."
+            )
+        latest_month = max(permissible)
+        if latest_month != available[-1]:
+            logger.info(
+                "Bundling the %s snapshot for serving, not the latest available (%s): "
+                "aggregates_through is %s",
+                latest_month.date(),
+                available[-1].date(),
+                pd.Timestamp(aggregates_through).date(),
+            )
         latest = {
             table: frame.loc[frame["snapshot_month"] == latest_month].reset_index(drop=True)
             for table, frame in snapshots.items()
@@ -188,6 +231,9 @@ class PreprocessingArtifact:
             metadata={
                 "category_cap": CATEGORY_CAP,
                 "winsor_quantile": WINSOR_QUANTILE,
+                # Provenance: the bound that chose latest_snapshot_month, so an artifact on
+                # disk can be checked against its version's contract without splits.yaml.
+                "aggregates_through": str(pd.Timestamp(aggregates_through).date()),
             },
         )
 

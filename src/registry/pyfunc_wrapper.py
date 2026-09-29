@@ -48,7 +48,7 @@ import numpy as np
 import pandas as pd
 
 from src.features.artifact import PreprocessingArtifact
-from src.features.build import REQUIRED_INPUT_COLUMNS
+from src.features.build import CATEGORICAL_SOURCES, REQUIRED_INPUT_COLUMNS, UNKNOWN
 from src.features.history import ENTITIES, METRIC_COLUMNS
 
 logger = logging.getLogger(__name__)
@@ -60,17 +60,25 @@ HISTORY_COLUMNS: frozenset[str] = frozenset(
     | {f"{spec.name}_is_new" for spec in ENTITIES}
 )
 
-#: Entity keys the snapshot join needs, plus the month it joins on.
+#: Entity keys the snapshot join needs.
 _ENTITY_KEYS: frozenset[str] = frozenset(
-    {spec.key for spec in ENTITIES}
-    | {spec.fallback_key for spec in ENTITIES if spec.fallback_key}
-    | {"purchase_month"}
+    {spec.key for spec in ENTITIES} | {spec.fallback_key for spec in ENTITIES if spec.fallback_key}
 )
+
+#: Everything the wrapper **computes rather than receives**, and therefore refuses as input.
+#:
+#: History comes from the bundled as-of snapshots. ``purchase_month`` belongs here for a less
+#: obvious reason: :meth:`~src.features.artifact.PreprocessingArtifact.transform` forces it to the
+#: bundled snapshot's month (§18 A6), so a caller-supplied value is discarded before it reaches a
+#: feature. Requiring a field and then ignoring it invites a client to believe it scores
+#: historical orders, which v1 does not do — A6 reserves that for an explicit as-of argument.
+#: Refusing it says so out loud (DECISIONS.md D34).
+COMPUTED_COLUMNS: frozenset[str] = HISTORY_COLUMNS | {"purchase_month"}
 
 #: What a caller must supply. Derived from the feature contract rather than restated, so it
 #: cannot drift when a feature is added or removed.
 RAW_INPUT_COLUMNS: tuple[str, ...] = tuple(
-    sorted((set(REQUIRED_INPUT_COLUMNS) - HISTORY_COLUMNS) | _ENTITY_KEYS)
+    sorted((set(REQUIRED_INPUT_COLUMNS) | _ENTITY_KEYS) - COMPUTED_COLUMNS)
 )
 
 #: Output column names, fixed so the API and its tests can rely on them.
@@ -124,9 +132,8 @@ class DelayPredictor(mlflow.pyfunc.PythonModel):
         Args:
             context: MLflow's ``PythonModelContext``. Unused — everything this model needs is
                 pickled with it rather than fetched from an artifact path at load time.
-            model_input: One row per order, carrying :data:`RAW_INPUT_COLUMNS`. History
-                features must **not** be supplied; they are attached from the bundled
-                snapshots.
+            model_input: One row per order, carrying :data:`RAW_INPUT_COLUMNS`.
+                :data:`COMPUTED_COLUMNS` must **not** be supplied.
             params: Ignored. Accepted because MLflow 3 passes it.
 
         Returns:
@@ -135,9 +142,9 @@ class DelayPredictor(mlflow.pyfunc.PythonModel):
             point produced a decision without looking it up somewhere else.
 
         Raises:
-            ValueError: If a required column is missing, or the caller supplied history
-                columns. Silently ignoring supplied history would let a client override the
-                leakage-safe snapshot join with anything it liked.
+            ValueError: If a required column is missing, or the caller supplied a column the
+                wrapper computes. Silently ignoring supplied history would let a client override
+                the leakage-safe snapshot join with anything it liked.
         """
         del context, params
         if model_input is None:
@@ -147,17 +154,43 @@ class DelayPredictor(mlflow.pyfunc.PythonModel):
         missing = [column for column in RAW_INPUT_COLUMNS if column not in frame.columns]
         if missing:
             raise ValueError(f"missing required input columns: {missing}")
-        supplied_history = sorted(HISTORY_COLUMNS & set(frame.columns))
-        if supplied_history:
+        supplied_computed = sorted(COMPUTED_COLUMNS & set(frame.columns))
+        if supplied_computed:
             raise ValueError(
-                f"history columns must not be supplied by the caller: {supplied_history}. "
-                "They are attached from the artifact's bundled as-of snapshots so that the "
-                "§4.5 leakage boundary cannot be bypassed from outside."
+                f"these columns are computed, not supplied: {supplied_computed}. History is "
+                "attached from the artifact's bundled as-of snapshots so the §4.5 leakage "
+                "boundary cannot be bypassed from outside, and purchase_month is forced to the "
+                "bundled snapshot month (§18 A6) so a supplied value would be discarded."
             )
 
+        return self.score(frame)[0]
+
+    def score(self, model_input) -> tuple[pd.DataFrame, dict[str, list[str]]]:
+        """Predictions **and** an unseen-category report, from a single transform.
+
+        Types: ``model_input`` is a :class:`pandas.DataFrame`.
+
+        Args:
+            model_input: Validated rows carrying :data:`RAW_INPUT_COLUMNS`. Callers that have not
+                validated should use :meth:`predict`, which does.
+
+        Returns:
+            ``(predictions, warnings)``. ``warnings`` maps a feature name to the sorted raw values
+            that were not seen at fit time and were therefore mapped to ``__unknown__``; it is
+            empty when everything was recognised.
+
+        **Why this exists rather than the API computing it.** §9 requires an unseen category to
+        return 200 with a warning instead of a 500, so *something* must notice. Preprocessing may
+        not live in the API layer (CLAUDE.md invariant 4), and asking the API to call `transform`
+        a second time to inspect the result would double the dominant serving cost: measured, a
+        single-row `transform` takes ~45 ms, nearly all of it the as-of snapshot join, which is
+        fixed overhead rather than per-row work. One transform, both answers.
+        """
+        frame = pd.DataFrame(model_input)
         # transform(), not transform_with_snapshots(): serving uses the single latest bundled
         # snapshot (§18 A6). The two-method split exists so this line states which it means.
         features = self.artifact.transform(frame)
+        warnings = self._unseen_categories(frame, features)
         raw = self._scores(features)
         calibrated = (
             np.asarray(self.artifact.calibrator.predict(raw), dtype=float)
@@ -165,7 +198,7 @@ class DelayPredictor(mlflow.pyfunc.PythonModel):
             else raw
         )
         threshold = float(self.artifact.threshold)
-        return pd.DataFrame(
+        predictions = pd.DataFrame(
             {
                 "probability": calibrated,
                 "is_late_predicted": calibrated >= threshold,
@@ -173,6 +206,31 @@ class DelayPredictor(mlflow.pyfunc.PythonModel):
             },
             index=frame.index,
         )
+        return predictions, warnings
+
+    def _unseen_categories(
+        self, raw_frame: pd.DataFrame, features: pd.DataFrame
+    ) -> dict[str, list[str]]:
+        """Which raw values fell through to ``__unknown__``, per feature.
+
+        Read off the **transformed** frame, so it reports what the model actually saw rather than
+        re-deriving the capping rule — a second copy of that rule could disagree with the first,
+        and then the warning would be the thing that lied.
+        """
+        report: dict[str, list[str]] = {}
+        for feature in self.artifact.categorical_features:
+            if feature not in features.columns:
+                continue
+            unknown_rows = (features[feature].astype("object") == UNKNOWN).to_numpy()
+            if not unknown_rows.any():
+                continue
+            source = CATEGORICAL_SOURCES.get(feature)
+            if source and source in raw_frame.columns:
+                values = raw_frame.loc[unknown_rows, source].dropna().astype(str).unique()
+                report[feature] = sorted(values.tolist())
+            else:
+                report[feature] = []
+        return report
 
     # -------------------------------------------------------------------- metadata ------
     def describe(self) -> dict[str, Any]:

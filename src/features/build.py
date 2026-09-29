@@ -28,9 +28,10 @@ winsorisation bounds, imputation medians — arrives as an argument, because fit
 here would fit it on whatever frame happened to be passed, including the evaluation set.
 :class:`src.features.artifact.PreprocessingArtifact` owns the fitting.
 
-Family sizes, totalling 39: F1 promise and timing 6, F2 geography 7, F3 order composition 6,
+Family sizes, totalling 38: F1 promise and timing 5, F2 geography 7, F3 order composition 6,
 F4 product physical 6, F5 payment 4, F6 seller history 5, F7 route history 3, F8 category
-history 2.
+history 2. F1 lost ``purchase_month`` in DECISIONS.md D29 — it could not have been learned,
+because no calibration window shares a calendar month with its fit window.
 """
 
 from __future__ import annotations
@@ -40,6 +41,7 @@ import logging
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -190,6 +192,21 @@ CATEGORICAL_FEATURES: tuple[str, ...] = (
     "payment_type",
 )
 
+#: Which raw column each categorical feature is built from, so a caller can be told *what* it
+#: sent that was unrecognised rather than merely which feature went unknown. Declared here, beside
+#: `construct_features`, because that is the only place the mapping is enacted — a copy anywhere
+#: else could drift silently. `customer_region` maps through :data:`STATE_TO_REGION` and
+#: `customer_zip_prefix_2` is a prefix of the zip, so in both cases the useful thing to report is
+#: the raw column that produced them. A test asserts every categorical feature has an entry.
+CATEGORICAL_SOURCES: dict[str, str] = {
+    "customer_state": "customer_state",
+    "seller_state": "seller_state",
+    "customer_region": "customer_state",
+    "customer_zip_prefix_2": "customer_zip_code_prefix",
+    "product_category": "dominant_category",
+    "payment_type": "dominant_payment_type",
+}
+
 #: Boolean features. Kept as bool rather than category: the tree libraries split on them
 #: directly and a 2-level category buys nothing.
 BOOLEAN_FEATURES: tuple[str, ...] = ("is_weekend", "same_state", "seller_is_new")
@@ -276,7 +293,7 @@ def construct_features(
     category_levels: dict[str, tuple[str, ...]],
     winsor_bounds: dict[str, float],
 ) -> pd.DataFrame:
-    """Build the 39-feature matrix.
+    """Build the 38-feature matrix.
 
     Args:
         orders: One row per order, with history already attached by
@@ -389,13 +406,58 @@ FEATURES_SCHEMA = "features"
 ARTIFACT_PATH = Path("artifacts/preprocessing.joblib")
 FEATURE_REPORT = Path("reports/feature_matrix.md")
 
+#: **The ORDER BY is not cosmetic** (DECISIONS.md D35). Postgres may return an unordered
+#: `SELECT` in any order, and it varies in practice — a parallel sequential scan interleaves its
+#: workers' output. Downstream, `ensemble.slice_window` sorts with `kind="stable"`, which
+#: preserves the input order among **tied** timestamps, and `fit_final_model` then cuts its
+#: early-stopping tail at a positional 85%. So an arbitrary scan order silently changed which
+#: rows validated the models, which changed their tree counts, which changed the shipped model.
+#: `order_id` is unique, so this is a total order and the matrix is a function of the data alone.
 ORDERS_QUERY = f"""
 SELECT * FROM {FEATURES_SCHEMA}.orders_analytical
+ORDER BY order_purchase_timestamp, order_id
 """
 
 LABELS_QUERY = f"""
 SELECT order_id, is_late FROM {FEATURES_SCHEMA}.order_outcomes
 """
+
+
+def window_slice(
+    window: Any,
+    orders: pd.DataFrame,
+    matrix: pd.DataFrame,
+    labels: pd.Series,
+) -> tuple[pd.DataFrame, np.ndarray, pd.Series]:
+    """Select one window's rows and put them in a **deterministic total order**.
+
+    Args:
+        window: A :class:`src.splits.Window`.
+        orders: The orders frame, carrying ``order_purchase_timestamp`` and ``order_id``.
+        matrix: The feature matrix, row-aligned to ``orders``.
+        labels: Labels, row-aligned to ``orders``.
+
+    Returns:
+        ``(X, y, timestamps)``, reindexed from 0 and sorted by
+        ``(order_purchase_timestamp, order_id)``.
+
+    **Why this exists rather than an inline sort at each call site** (DECISIONS.md D35).
+    Both Phase 4 and Phase 5 sorted with ``np.argsort(..., kind="stable")``, which is correct
+    about ties only if the incoming order is itself deterministic — and it was not, because
+    ``ORDERS_QUERY`` had no ``ORDER BY``. Everything downstream slices **positionally**:
+    ``TimeSeriesSplit`` cuts folds by index and ``fit_final_model`` takes the last 15% as its
+    early-stopping tail. So tied timestamps landing in a different order silently changed which
+    rows validated the models, and the shipped model changed with them. Two call sites meant two
+    chances to get it wrong; now there is one, and ``order_id`` makes the order total.
+    """
+    mask = window.mask(orders["order_purchase_timestamp"]).to_numpy()
+    stamps = orders.loc[mask, "order_purchase_timestamp"]
+    order = np.lexsort((orders.loc[mask, "order_id"].to_numpy(), stamps.to_numpy()))
+    return (
+        matrix.loc[mask].iloc[order].reset_index(drop=True),
+        labels.loc[mask].to_numpy()[order].astype(int),
+        stamps.iloc[order].reset_index(drop=True),
+    )
 
 
 def load_inputs(conn) -> dict[str, object]:
@@ -460,6 +522,11 @@ def build_matrix(version: str = "v1") -> dict[str, object]:
         zip_centroids=inputs["zip_centroids"],
         state_centroids=inputs["state_centroids"],
         train_cutoff=train_orders["order_purchase_timestamp"].max(),
+        # The full snapshot set is passed above because the training matrix joins per purchase
+        # month, which is leakage-safe. This bound governs only which snapshot is bundled for
+        # SERVING — without it the artifact bundles the newest month in the database, which is
+        # eight months past v1's window and inside the promotion evaluation set (D33).
+        aggregates_through=splits.aggregates_through,
     )
     matrix = artifact.transform_with_snapshots(orders, snapshots)
     labels = (

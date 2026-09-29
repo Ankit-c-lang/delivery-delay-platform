@@ -5,64 +5,178 @@ that task. Source of truth for *what* to build is `PLAN.md`; this file only trac
 are*. Decisions and their reasons live in `DECISIONS.md`.
 
 - **Plan version:** v1 (2026-09-28) + amendments §18 · **Pre-flight completed:** 2026-09-28
-- **Current phase:** Phase 6 — MLflow, pyfunc wrapper, registry · **✅ COMPLETE**
-- **Overall:** **7 / 12 phases** · 326 tests green, zero skips
+- **Current phase:** Phase 7 — FastAPI and the parity test · **✅ COMPLETE**
+- **Overall:** **8 / 12 phases** · 378 tests green, zero skips · Phase 6's output rebuilt after two real bugs (D33, D35)
 - **Estimated remaining:** ~20 h of build work (PLAN §3 budget: 36-42 h)
 
 ---
 
 ## Currently working on
 
-**Nothing in flight. Phase 6 is complete — the spine is in place.**
+**Phase 7 started, then paused to fix two bugs found by checking the model the API was about to
+serve.** Both are in `DECISIONS.md`; both changed committed results, so **no number in an older
+report or in a Phase 4-6 section of this file should be trusted over D33 and D35.**
 
-`delivery_delay_classifier` **v1 is registered with `@champion`**, and it loads in a **fresh
-Python process** by alias alone with the right signature — Phase 6's completion criterion, taken
-literally as a subprocess that imports nothing of this project. `make train` runs in ~22 s and
-produces:
+### D33 — the bundled serving snapshot ignored `aggregates_through`
 
-- a parent run `delivery_delay_v1_{timestamp}`
-- five nested children: `baseline_logreg`, `catboost`, `lightgbm`, `xgboost`, `ensemble`
-- the §7 param/metric/artifact set: split dates, feature families, snapshot month, git SHA (and
-  whether the tree was dirty), PR-AUC / ROC-AUC / Brier / recall@10% / threshold / expected cost,
-  PR and ROC and calibration curves, the confusion matrix, the SHAP plots, the ordered feature
-  list, the tuning provenance, and the preprocessing artifact as a separately downloadable file
-- a pyfunc bundling **artifact + model + calibrator + threshold**, with a signature and a
-  representative `input_example`
+`PreprocessingArtifact.fit` took `max(snapshot_month)` over whatever it was handed, and
+`build_matrix` handed it every snapshot in the database. So v1's artifact — the registered
+`@champion` — bundled the **2018-08** snapshot against a **2017-12-31** train cutoff. A model built
+as of end-February 2018 cannot have seen August 2018.
 
-**The round-trip test is the one that matters:** log, load back by URI in a clean context, and
-assert predictions match the in-memory object **to 1e-9**. That is the test that catches §13's
-"classic skew bug" — a model logged without its preprocessing loads fine, predicts fine, and is
-quietly wrong.
+It mattered because the 2018-08 snapshot aggregates outcomes delivered before 2018-08-01, which
+includes May-July 2018 deliveries: the outcomes of orders **inside the promotion evaluation
+window**. Scoring the champion through the serving path there would have read the gate's answer
+key, and v1 and v2 would have bundled the *same* snapshot, so Phase 9 would not even have been a
+contest between two models' histories.
 
-### Two §7 instructions that could not be followed literally, and why that is right
+`aggregates_through` was declared per version in `configs/splits.yaml` and asserted by
+`splits.py` — and then read by nothing. **Validating a config value is not enforcing it.**
 
-**The holdout PR-AUC tag.** §7 wants each version tagged with it. The 2018-05 → 08 window is
-locked to the promotion gate (§18 A3, D25), so a training run has no legitimate way to compute
-it. The tag reads `pending: set by the promotion gate (§18 A3)` and Phase 9 fills it in.
-Registering a model is not the same event as evaluating it. A test asserts the tag stays pending.
+Fixed: `fit` requires `aggregates_through`; the bundled month is the newest `M` with
+`M <= aggregates_through + 1 day` (the filter is `delivered < M`, so that boundary is exact and
+being one month tighter would discard real history). v1 bundles **2018-03-01**, v2 **2018-05-01**,
+both entirely before the evaluation window. Measured impact: **100% of rows** change, mean |Δ|
+**4,224.76** on `route_order_count_hist`. Training was never affected, and a test proves it —
+two artifacts differing only in the cutoff produce byte-identical `transform_with_snapshots`.
 
-**Which run registers the model.** §7 shows the model registered from the `ensemble` child. The
-blend lost (D31), so that child logs the blend experiment *and* registers whatever actually
-ships — XGBoost. The structure is kept; the honesty is too.
+**A test had encoded the bug.** `test_the_bundled_snapshot_is_the_latest_month` asserted
+`2018-08-01` and passed for two phases, because it pinned the *mechanism* rather than the
+*contract*. A test written from the implementation cannot catch the implementation being wrong.
 
-### Four MLflow behaviours, each of which caused a real bug here
+### D35 — thread counts were unpinned, so the CPU chose which model shipped
 
-1. **`search_model_versions` returns an empty `aliases` field.** `make registry` reported
-   `(no alias)` for a model that *was* the champion. Aliases now come from
-   `get_registered_model(...).aliases`, inverted. A test asserts the trap still exists so the
-   workaround can be removed when MLflow fixes it.
-2. **`ModelVersion.version` is an `int` from SQLite and a `str` over HTTP.** A caller comparing
-   it behaves differently by backend, so `_assign_alias` normalises its return to `str`.
-3. **`mlflow.set_tracking_uri` writes into the process environment**, not just an in-memory
-   global — so a test pointing at a throwaway SQLite store redirected every later test. An
-   autouse fixture now snapshots and restores both. Worth having before Phases 7-9 add more.
-4. **My own skip clause hid a real failure.** The fresh-process test skipped with "registry not
-   reachable" when the actual cause was a typo in the test script (`PyFuncModel.model_uri` does
-   not exist; it is `.metadata.signature`). Reachability is now checked *separately and first*,
-   so a genuine failure inside the subprocess is reported as a failure.
+Re-running Phase 5 flipped the shipped model from XGBoost to CatBoost **with no source change**.
+The investigation, each step ruling something out:
 
-That last one is the most useful lesson: a broad `except -> skip` turns every bug in a test into
-a green run.
+1. Stashed every Phase 7 edit, ran the **committed** code — still CatBoost. Not my changes.
+2. `artifacts/tuned_params.json` matched the committed `reports/phase4_models.md` to four decimals.
+3. `as_of_snapshots.md` regenerated byte-identical; `feature_matrix.md` differed by exactly one
+   line (D33's snapshot month). Same data, same matrix.
+4. `OMP_NUM_THREADS=4` and `=2` reproduced the committed numbers **exactly** — `xgboost 0.21520`,
+   blend delta `-0.00156`. Ten threads gives `catboost 0.21344`.
+
+All three libraries took every core (CatBoost had `thread_count: -1` written in the config), and
+their FP reductions are partitioned by thread count. **D31's "ship XGBoost" was noise**: the margin
+was 0.0067 and thread count alone moves CatBoost by 0.005.
+
+Fixed: threads **and** seeds pinned for all three, plus LightGBM's `deterministic: true` with
+`force_row_wise: true`. Verified byte-identical at `OMP_NUM_THREADS=2` and `=10`, because the
+library parameter overrides the environment. Hyperparameters **re-tuned** under the pinned config —
+6 minutes, and *faster* than the unpinned run (69s/78s/209s against 101s/124s/309s), so
+reproducibility cost negative time here.
+
+Also fixed, latently: `ORDERS_QUERY` had no `ORDER BY` while both Phase 4 and Phase 5 sorted with
+`kind="stable"`, which preserves input order among the **522 tied timestamps** — and
+`TimeSeriesSplit` and `fit_final_model` both slice **positionally**. Measured that Postgres's order
+is stable today, so it caused nothing, but it would have the first time anything rewrote that
+table. Now a total order plus one shared `build.window_slice` instead of two hand-rolled sorts.
+
+**The reusable lesson:** a result stable across consecutive runs can still be irreproducible,
+because what varies is the environment, not a seed. Every determinism check here until now re-ran
+a command back-to-back on an idle machine — exactly the condition that hides this. Now invariant 14.
+
+### Current results, reproducible
+
+Ship **CatBoost** alone: cal-window PR-AUC **0.21604**; blend 0.21924, **delta +0.00320**, under
+the 0.005 bar. Threshold **0.1792** at an assumed 5:1 FN:FP ratio — **42.5% recall at a 17.2% flag
+rate, 24.0% precision**. CV PR-AUC: lightgbm 0.15349, catboost 0.15209, xgboost 0.14666, against a
+logistic baseline of 0.13545 and a majority-class 0.06559.
+
+**Treat the three GBDTs as indistinguishable** — they span ~0.004 on 13,624 calibration rows. The
+choice between them belongs to inference cost, dependency weight or unseen-category handling.
+CatBoost shipping puts `catboost` back into `requirements-api.txt`, exactly as that file's own
+caveat predicted, and the file now records the coupling: promoting a challenger that ships a
+different library needs an image rebuild first, so promotion is not purely a registry operation.
+
+### Registry state
+
+`delivery_delay_classifier` **v2 is `@champion`** (catboost, thr 0.17925, bundled snapshot
+2018-03-01) and loads in a fresh process by alias alone. **v1 is tagged
+`withdrawn: do not deploy`** with its reason, and `make registry` prints that status — a withdrawn
+version keeps its metrics and would otherwise read as a plausible candidate.
+
+Deleting v1 was the first intent and was rejected: destroying registry history is the opposite of
+what a registry is for, and superseding is the more honest artefact. Moving the alias by hand is a
+documented one-off — `_assign_alias` correctly *refused* to promote v2, because promotion is the
+gate's call; withdrawing a version built by broken code is a correction, not a promotion on merit.
+
+### Phase 7 — the API, and what it is measured at
+
+**Complete except for the write-up.** `make serve` runs it on 8001; `make bench` measures it.
+
+- `api/` exactly as §9 lays out: `main.py` (factory + `asynccontextmanager` lifespan),
+  `config.py`, `schemas.py`, `model_loader.py`, `exceptions.py`, `routes/{health,predict,info}.py`.
+- **Four endpoints.** `/health` answers **503** when the model failed to load, and a bad
+  `MODEL_URI` does **not** kill the process — a container that exits on a registry blip gets
+  restarted in a loop and tells an operator nothing.
+- **Three-way `MODEL_URI`**: `@champion` alias, pinned `/{version}` (the rollback story), or a
+  local path. The local path is what lets the whole API test file run in CI with no registry, no
+  tracking server and no Postgres.
+- **The model loads once**, in the lifespan handler. Asserted by object identity rather than
+  timing, which would be flaky on a loaded machine.
+- **A signature mismatch refuses to start.** Scoring goes through the unwrapped predictor (so the
+  unseen-category report costs one transform, not two), which gives up MLflow's per-request schema
+  enforcement — so the contract is checked once, at startup, against `RAW_INPUT_COLUMNS`. A model
+  whose contract has moved fails to boot instead of returning 500s under load.
+
+**Verified against the running service, not just TestClient**: `/health` → version 2,
+`/model/info` → catboost / 38 features / threshold 0.17925 / bundled snapshot 2018-03-01 /
+24 request columns / 16 rejected, unseen category → 200 with a warning, bad type → 422,
+1001 records → 400 `batch_too_large`.
+
+### Measured latency (§9 wants the number recorded)
+
+| | p50 | p95 |
+|---|---:|---:|
+| single, real HTTP | **52.64 ms** | 59.98 ms |
+| batch-100, real HTTP | **54.91 ms** | 75.07 ms |
+| per record inside a batch | **0.549 ms** | — |
+
+In-process (TestClient, no network hop) measures 51.46 / 54.38 ms — **the network is not the cost**.
+Batching is **96x cheaper per record**, and that ratio is the finding: a 1-row
+`artifact.transform` takes ~45 ms while 1,000 rows take ~69 ms, so almost the entire bill is
+**fixed overhead in the as-of snapshot join**, not per-row work, and not the model — which is
+sub-millisecond. Anyone optimising this should start at the snapshot join. Not done here: it is
+Phase 7's job to measure, and a 52 ms checkout-time call is acceptable.
+
+### The parity test, and how it was made able to fail
+
+`tests/test_parity.py` — 20 rows from `tests/fixtures/`, **never** the 2018-05 → 08 window (§18 A3),
+through the training-time path (artifact + model + calibrator directly) and through the API via
+`TestClient` on the same locally saved artifact. Equal within **1e-6**. Plus: batch-vs-single
+invariance, row-order invariance, a null category surviving the JSON round trip, and the threshold
+coming from the artifact rather than from config.
+
+Three things were needed to stop it being **vacuously green**, which is the real work in a parity
+test:
+
+1. **Rows are taken on a stride, not `head(20)`.** The first twenty fixture rows land on two
+   distinct probabilities; a comparison over them would pass even if the two paths disagreed.
+2. **The fixture calibrator is fitted out of sample.** In-sample scores separate almost perfectly,
+   which collapses isotonic into a two-step function — again, comparing near-constants.
+3. **A guard class asserts the 20 rows carry ≥3 distinct probabilities** and that both decisions
+   appear somewhere in the fixture, so if either property ever regresses the suite says so.
+
+`TestParityIsScopedToOneArtifact` then proves the §18 A6 asymmetry is **real** — the training and
+serving transforms genuinely disagree on history features — because if they agreed, "parity is
+scoped to one artifact" would be an empty distinction rather than a load-bearing one.
+
+`TestTheApiAddsNoPreprocessing` enforces invariant 4 by **AST import inspection**: no module under
+`api/` may import `src.features` or `src.training`. That is the check that fails when someone adds
+"just one" normalisation to a route.
+
+### A finding from running the champion over all 96,203 real orders
+
+The champion reports unseen values for **3 seller states** (`AM`, `MA`, `PI` — too few sellers to
+appear in the fit window) and **43 product categories**. The second number is **not drift**:
+`CATEGORY_CAP = 30` keeps the top 30 of 72 by design, so the other 42 collapse to `__unknown__`
+deliberately.
+
+That distinction forced a correction to my own warning text, which had said "was not seen during
+training" — false for most of those 43. It now reads "is not among the levels this model was trained
+on". A warning that overstates its case is one an operator learns to ignore, and the cost of that
+would be the genuine signal in the seller-state case.
 
 ---
 
@@ -529,8 +643,8 @@ since the real dataset is 121 MB and CC BY-NC-SA and will never be in a workflow
 | 4 | Baselines and single models | 4 h | medium | ✅ **complete** · LightGBM leads at 0.1528 |
 | 5 | Ensemble, calibration, threshold | 4 h | medium | ✅ **complete** · ship XGBoost (D31) · D29 resolved |
 | 6 | MLflow, pyfunc wrapper, registry | 4 h | medium | ✅ **complete** · v1 `@champion`, loads in a fresh process |
-| 7 | FastAPI and the parity test | 4 h | medium | **next** · ⚠️ read §18 A3, A6 first · `RAW_INPUT_COLUMNS` is the request contract |
-| 8 | Docker and Compose | 3 h | medium | ⚠️ read §18 A5 first · validate `mlflow-skinny` **and** the 305 MB CUDA dependency (D14) |
+| 7 | FastAPI and the parity test | 4 h | medium | ✅ **done** · parity green at 1e-6 · single p50 52.6 ms |
+| 8 | Docker and Compose | 3 h | medium | **next** · ⚠️ read §18 A5 first · `requirements-api.txt` now needs **catboost** (D35); validate `mlflow-skinny` |
 | 9 | Retraining lifecycle and promotion gate | 3.5 h | medium | ⚠️ read §18 A2 first; set the Brier tolerance against D20 |
 | 10 | Full CI/CD | 3 h | medium | CI gains pytest + Postgres service container |
 | 11 | Documentation and interview prep | 2.5 h | easy | |

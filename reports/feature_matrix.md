@@ -38,7 +38,7 @@ Numeric features are imputed with the **training** median, stored in the artifac
 ## Artifact
 
 - Fitted on **36,174** training rows, cutoff `2017-12-31 23:29:31`
-- Latest bundled snapshot month: `2018-08-01 00:00:00` (the §18 A6 serving path)
+- Latest bundled snapshot month: `2018-03-01 00:00:00` (the §18 A6 serving path)
 - Input schema hash: `d3e9050f65ce060e`
 - Winsorisation: {'days_to_shipping_limit': 21.2151} at q=0.995
 
