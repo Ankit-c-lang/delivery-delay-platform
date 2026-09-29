@@ -49,6 +49,13 @@ extend-exclude = "notebooks"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --strict-markers --cov=src --cov-report=term-missing"
+# The repo root on sys.path, so `src` imports resolve however pytest is invoked.
+#
+# `python -m pytest` adds the cwd implicitly and the bare `pytest` console script does not, so the
+# suite passed for ten phases via the Makefile and then failed on its first CI run with
+# `ModuleNotFoundError: No module named 'src'` (DECISIONS.md D44). Fixing it here rather than in the
+# workflow means the project does not depend on which entry point the caller happens to use.
+pythonpath = ["."]
 markers = [
     "slow: needs the real dataset or a full training run; excluded from CI",
     # Corrected in Phase 10: this said "needs a live Postgres or MLflow server", which understated

@@ -1581,3 +1581,59 @@ all fail before anything is published.
 **CI is not CD, and the README says so.** CI is lint plus tests plus build plus smoke. CD here is
 *publish a versioned, smoke-tested artifact to GHCR*, plus a one-command Compose deploy on a machine
 someone owns. There is no hosted environment, and §10.3 is explicit that a CV must not imply one.
+
+---
+
+## D44
+### The first real CI run found two failures, and neither was findable locally
+**Date.** 2026-09-29 (Phase 10)
+
+Both workflows failed on their first execution. Recorded because the *reason* each was invisible
+locally is the reusable part.
+
+**1. `ModuleNotFoundError: No module named 'src'` — the suite could not even collect.**
+
+`python -m pytest` puts the current directory on `sys.path`; the bare `pytest` console script does
+not. The Makefile has always used the former, so 444 tests passed for ten phases; `ci.yml` called
+`pytest` directly and the suite failed at conftest import.
+
+Reproduced locally first — `.venv/bin/pytest` gives the identical error — then fixed in
+`pyproject.toml` with `pythonpath = ["."]` rather than by changing the workflow's command. The
+workflow would have been a fine place to paper over it; the project config is where it belongs,
+because a test suite should not depend on which entry point the caller happens to use. Both CI steps
+now collect with the bare invocation: 368 unit tests and 9 `ci_etl` tests.
+
+**Why local runs could never have caught it:** every local path went through `make`, which uses
+`python -m`. The bug was not in the code or the tests but in the *one invocation nobody had tried*.
+
+**2. `invalid tag ...: repository name must be lowercase` — the image would not build.**
+
+`${{ github.repository }}` is `Ankit-c-lang/delivery-delay-platform`, preserving the owner's
+capitalisation, and a Docker repository name must be lowercase. GitHub Actions expressions have no
+lowercase function, so `IMAGE` is now computed in the first step with
+`tr '[:upper:]' '[:lower:]'` — in exactly one place, so a later `docker tag` cannot reintroduce it.
+
+**Why local runs could never have caught it:** locally the image is `delay-api:local`. The GHCR tag
+only exists inside the workflow, so the first build was the first time that string was ever formed.
+
+**What was checked before pushing again, instead of discovering it one push at a time.** Two
+things, both of which could have failed and did not:
+
+- **An AST scan for tests taking the Postgres fixtures** (`engine`, `db_row_counts`,
+  `attached_features`, `csv_row_counts`) without an `integration`/`slow` marker. Such a test would
+  **fail** rather than skip against CI's empty service container. None found.
+- **A simulated CI environment**: `.env` moved aside, only the CI variables set,
+  `MLFLOW_TRACKING_URI` unset. All 368 unit tests passed, which rules out the hidden-dependency class
+  — a test quietly relying on this machine's `.env` or its running MLflow.
+
+**The honest note about skips.** In real CI the three live-container tests in
+`tests/test_docker.py` will **skip**, because no `delay-api` is running there; they passed in the
+simulation only because this machine has one up. So CI will not show the "zero skips" that local runs
+do, and `ci.yml` states that in its job summary rather than leaving a reader to assume otherwise.
+`build.yml` covers the container end to end instead.
+
+**The general lesson, which is the same one D35 and D40 taught in different clothes.** A check is
+only as good as the variation it exposes the code to. D35: reproducibility means varying the
+environment, not repeating the run. D40: a venv cannot tell you what an image needs. Here: a test
+suite exercised through one entry point has been tested against one entry point. In all three the
+measurement was correct and its *setting* was doing the lying.

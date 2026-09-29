@@ -299,6 +299,13 @@ and coverage; `build.yml` builds the image, smoke-tests it and publishes to GHCR
 The image smoke test compares the container's probability to the runner's **bitwise**, so a broken
 model load or a pruned dependency that shifts numerics fails before anything is published.
 
+**The first CI run failed twice, and neither was findable locally** (D44). `pythonpath = ["."]` is
+now in `pyproject.toml` because `python -m pytest` puts the cwd on `sys.path` and the bare `pytest`
+console script does not — the Makefile used the former for ten phases, so the suite could not even
+*collect* in CI. And `IMAGE` is lowercased in a step, because `${{ github.repository }}` keeps the
+owner's capitals and Docker rejects them. **In CI the three live-container tests skip** (no
+`delay-api` there), so CI will not show local's zero skips; the job summary says so.
+
 **Next: Phase 11 — Documentation and interview prep** (~2.5 h), the last phase.
 - **Lead with 1.36x lift on the held-out window, not 0.216 PR-AUC** (D42). The README already does;
   keep it that way. Quoting 0.216 without naming its window is the one dishonest number available.

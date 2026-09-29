@@ -27,8 +27,10 @@ concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  IMAGE: ghcr.io/${{ github.repository }}/delay-api
+# IMAGE is not set here: it depends on ${{ github.repository }}, which preserves the owner's
+# capitalisation, and a Docker repository name must be lowercase. `Ankit-c-lang/...` fails with
+# `repository name must be lowercase` at build time, and GitHub Actions expressions have no
+# lowercase function, so it is computed in the first step instead (DECISIONS.md D44).
 
 jobs:
   build:
@@ -36,6 +38,17 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+
+      - name: Compute the image name in lowercase
+        # `${{ github.repository }}` keeps the owner's capitalisation and Docker rejects it. Doing
+        # this in a step rather than inline keeps the lowercasing in exactly one place, so a later
+        # `docker tag` cannot reintroduce the bug.
+        run: |
+          echo "IMAGE=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')/delay-api" \
+            >> "$GITHUB_ENV"
+
+      - name: Show the resolved image name
+        run: echo "building $IMAGE"
 
       - uses: actions/setup-python@v7
         with:
