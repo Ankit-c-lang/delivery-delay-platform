@@ -51,7 +51,14 @@ testpaths = ["tests"]
 addopts = "-q --strict-markers --cov=src --cov-report=term-missing"
 markers = [
     "slow: needs the real dataset or a full training run; excluded from CI",
-    "integration: needs a live Postgres or MLflow server",
+    # Corrected in Phase 10: this said "needs a live Postgres or MLflow server", which understated
+    # it. These tests assert facts about the REAL Olist data — 99,224 review rows, exact
+    # leading-zero counts — so they need a service that has already been loaded with it. That is
+    # why they cannot run in CI even with a Postgres service container available.
+    "integration: needs a live Postgres or MLflow server ALREADY LOADED with the project's data",
+    # The CI-safe counterpart: runs the same loader and transform against committed synthetic CSVs
+    # in a database it creates and drops itself. Needs Postgres, never needs the dataset.
+    "ci_etl: runs the real ETL on synthetic fixtures in a throwaway database (PLAN.md §10.3)",
 ]
 filterwarnings = [
     # Fail on pytest's own removal warnings. These are always our mistake, never a

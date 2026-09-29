@@ -50,8 +50,8 @@ explicit approval.
 module does not exist yet is not written (DECISIONS.md D15).
 
 **Exist now (Phases 0-6):**
-- `make lint | format | test | test-unit` — `test-unit` skips anything needing Postgres or
-  the dataset, which is what CI will run from Phase 10
+- `make lint | format | test` · `make test-unit` (CI's first pytest step: needs no services) ·
+  `make test-ci-etl` (the real ETL on synthetic CSVs in a throwaway database)
 - `make up | down | stop | ps | logs | health | psql`
   `up` waits for both services to report `healthy`. `down` keeps volumes on purpose.
 - `make check-data | load-raw | build-orders` and `make etl` for all three in order
@@ -281,14 +281,32 @@ reverses.
 cannot unpickle its own model. With D41's `libgomp1` finding, promotion is **an alias move plus an
 image that can load what the alias points at** — and the gate checks only the first half.
 
-**Next: Phase 10 — Full CI/CD** (~3 h).
-- CI is still **lint-only**. `make test-unit` exists for exactly this and has never run in CI, so
-  all 435 tests are local-only. Expect the first CI run with pytest to find machine-dependent tests.
-- §10.3 wants a Postgres service container, the ETL smoke test on synthetic fixtures, coverage, and
-  the image build pushed to GHCR.
-- The live-container tests in `tests/test_docker.py` skip without a daemon, and the integration tests
-  need Postgres and the 121 MB dataset that CI will never have — `-m "not integration and not slow"`
-  is what `test-unit` already encodes.
+**Phase 10 COMPLETE.** `ci.yml` now runs ruff, black, **pytest with a Postgres service container**
+and coverage; `build.yml` builds the image, smoke-tests it and publishes to GHCR as `:latest` and
+`:{sha}`. `README.md` exists with badges.
+
+**Three things to know before touching CI** (D43):
+- **CI never needs the dataset.** `tests/fixtures/synthetic_olist.py` writes all nine raw Olist CSVs
+  with headers taken from `load_raw.SPECS`, and the `ci_etl` tests run the **real** loader and
+  transform against them in a database they create and drop themselves. Do not point that marker at
+  the configured database — `recreate=True` would destroy a developer's loaded data.
+- **The `integration` marker means "needs a service ALREADY LOADED with the project's data"**, which
+  is why a service container does not let those tests run. The description used to understate this.
+- **The fixture model is generated, not committed** (`scripts/make_fixture_model.py`), with
+  `requirements-api.txt` so its libraries match the image's. A pickle in git is coupled to the
+  versions that wrote it with nothing recording the coupling.
+
+The image smoke test compares the container's probability to the runner's **bitwise**, so a broken
+model load or a pruned dependency that shifts numerics fails before anything is published.
+
+**Next: Phase 11 — Documentation and interview prep** (~2.5 h), the last phase.
+- **Lead with 1.36x lift on the held-out window, not 0.216 PR-AUC** (D42). The README already does;
+  keep it that way. Quoting 0.216 without naming its window is the one dishonest number available.
+- §13 requires the CV wording to avoid implying a hosted deployment exists. It does not: CD here is
+  a versioned smoke-tested artifact in GHCR plus a Compose deploy.
+- The strongest material is not the model. It is D33, D35, D38 and D41 — four bugs that each passed
+  their own tests for weeks — plus the gate refusing a retrain and `purchase_month` being dropped
+  because `sin`/`cos` cannot manufacture a second November.
 
 The `realtime-fraud-detection` stack is currently **stopped** to free RAM. Restart it with
 `docker start realtime-fraud-detection-redis-1 realtime-fraud-detection-scorer-1

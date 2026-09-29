@@ -8,7 +8,7 @@ PY := .venv/bin/python
 COMPOSE := docker compose -f docker-compose.yml
 
 .DEFAULT_GOAL := help
-.PHONY: help lint format test test-unit up down stop ps logs psql health check-data load-raw serve bench bootstrap build api-up api-down api-logs promote \
+.PHONY: help lint format test test-unit test-ci-etl up down stop ps logs psql health check-data load-raw serve bench bootstrap build api-up api-down api-logs promote \
         build-orders etl snapshots features baselines tune decide train registry
 
 help: ## List available targets
@@ -26,8 +26,11 @@ format: ## Apply ruff --fix and black
 test: ## pytest with coverage (needs `make up` and the real dataset)
 	$(PY) -m pytest
 
-test-unit: ## Only tests that need neither Postgres nor the dataset (what CI runs)
-	$(PY) -m pytest -m "not integration and not slow"
+test-unit: ## Only tests needing neither Postgres nor the dataset (CI's first pytest step)
+	$(PY) -m pytest -m "not integration and not slow and not ci_etl"
+
+test-ci-etl: ## The real ETL on synthetic CSVs in a throwaway database (CI's second pytest step)
+	$(PY) -m pytest -m ci_etl
 
 up: ## Start postgres + mlflow, wait for both to report healthy
 	$(COMPOSE) up -d --wait postgres mlflow

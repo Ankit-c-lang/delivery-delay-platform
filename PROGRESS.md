@@ -5,8 +5,8 @@ that task. Source of truth for *what* to build is `PLAN.md`; this file only trac
 are*. Decisions and their reasons live in `DECISIONS.md`.
 
 - **Plan version:** v1 (2026-09-28) + amendments §18 · **Pre-flight completed:** 2026-09-28
-- **Current phase:** Phase 9 — Retraining lifecycle and promotion gate · **✅ COMPLETE**
-- **Overall:** **10 / 12 phases** · 435 tests green, zero skips · Phase 6's output rebuilt after two real bugs (D33, D35)
+- **Current phase:** Phase 10 — Full CI/CD · **✅ COMPLETE**
+- **Overall:** **11 / 12 phases** · 444 tests green, zero skips · Phase 6's output rebuilt after two real bugs (D33, D35)
 - **Estimated remaining:** ~20 h of build work (PLAN §3 budget: 36-42 h)
 
 ---
@@ -101,7 +101,78 @@ what a registry is for, and superseding is the more honest artefact. Moving the 
 documented one-off — `_assign_alias` correctly *refused* to promote v2, because promotion is the
 gate's call; withdrawing a version built by broken code is a correction, not a promotion on merit.
 
-### Phase 9 — the gate refused, which is the phase working
+### Phase 10 — CI that runs the ETL without ever holding the dataset
+
+**Complete.** `ci.yml` runs ruff, black, then pytest in two passes — the unit and contract tests
+(needing no services, with coverage) and the `ci_etl` pass against a **Postgres service container**.
+`build.yml` builds the image on main, smoke-tests it, and publishes `:latest` and `:{sha}` to GHCR.
+`README.md` exists with badges.
+
+#### The problem worth solving: CI cannot have the data
+
+121 MB, CC BY-NC-SA, never committed and never downloaded in a workflow. But §10.3 is right that a
+service container running the ETL for real "is the part that looks like real CI, and it's cheap", and
+a green badge that skipped the ETL proves nothing about the code that meets real data.
+
+`tests/fixtures/synthetic_olist.py` writes all **nine** raw Olist CSVs, with headers taken from
+`src.etl.load_raw.SPECS` rather than restated — so a schema change breaks the generator instead of
+producing files the loader silently rejects. The real `load_all` and the real `build_orders` then run
+against them: **nine tests, 4.4 seconds.**
+
+Three fixture properties are deliberate, because each keeps alive a path a convenient fixture kills:
+
+| property | what it protects |
+|---|---|
+| a newline inside one review comment in ten | **invariant 11** — the fixture's reviews file has **265 physical lines and 240 logical rows**, reproducing the real file's 104,719 against 99,224. A loader counting lines now fails a test instead of looking right. |
+| leading-zero zip prefixes (`01001`) | the columns are `TEXT`; an integer fixture would let a regression to `INTEGER` pass |
+| real nulls in nullable product columns | the COPY path and the imputation both see an absence rather than a zero |
+
+**It creates and drops its own database.** Marked `ci_etl`, not `integration`, because
+`load_all(recreate=True)` against the configured database would have **destroyed this machine's own
+loaded data**. Verified after the run: `features.orders_analytical` still held its 96,203 real rows
+and no scratch database leaked.
+
+#### A marker whose description was wrong
+
+`integration` said "needs a live Postgres or MLflow server". Those tests assert facts about the
+**real data** — 99,224 review rows, exact leading-zero counts — so they need a server *already loaded
+with it*, and a service container does not help them. The old wording implied CI could run them by
+adding a service, which would have bought a confusing red build and an afternoon spent debugging the
+wrong thing.
+
+#### The fixture model is generated, not committed
+
+§10.3 asks for a committed 10-tree LightGBM. `scripts/make_fixture_model.py` builds one instead,
+because a pickle in git is a **binary coupled to the library versions that wrote it** with nothing in
+the repository recording that coupling: the day LightGBM or MLflow moves it either fails far from its
+cause or behaves subtly differently, and neither shows in a diff. CI runs the script with
+**`requirements-api.txt`**, so the fixture and the image share their versions by construction rather
+than by hope. Same reasoning as D24 keeping the feature matrix out of the database.
+
+#### The smoke test compares numbers, not status codes
+
+Verified locally against the real image, pointed at a local fixture model via `MODEL_URI=/model` —
+§9's third resolution form, which exists for exactly this:
+
+```
+container: 0.07142857142857142
+reference: 0.07142857142857142     bitwise identical
+unseen category -> 200 with a warning naming the value
+malformed input -> 422, not 500
+container uid   -> 1000
+```
+
+A build step that checks the image exists proves nothing; one that checks `/health` returns 200
+proves the web framework starts. This catches a broken model load, a pruned dependency that shifts
+numerics, and preprocessing that silently no-ops — before anything is published.
+
+#### Stated plainly, because it would be easy to overclaim
+
+**CI is not CD.** CI is lint, tests, build, smoke. CD here is *a versioned, smoke-tested artifact in
+GHCR* plus a one-command Compose deploy on a machine someone owns. There is **no hosted
+environment**, and §10.3 requires that a CV not imply one. The README says so in those words.
+
+### Phase 9 — the gate refused, which is the phase working### Phase 9 — the gate refused, which is the phase working
 
 **Complete.** `make promote` scored both aliases on the identical 25,352-row window and left the
 champion in place. §8 is explicit that a no-promote run is a success; a gate that always passes is
@@ -839,8 +910,8 @@ since the real dataset is 121 MB and CC BY-NC-SA and will never be in a workflow
 | 7 | FastAPI and the parity test | 4 h | medium | ✅ **done** · parity green at 1e-6 · single p50 52.6 ms |
 | 8 | Docker and Compose | 3 h | medium | ✅ **done** · **1.03 GB** image, 65 packages · cold cycle verified · D41 band ships lightgbm |
 | 9 | Retraining lifecycle and promotion gate | 3.5 h | medium | ✅ **done** · gate ran for real and **refused** · holdout lift **1.36x** |
-| 10 | Full CI/CD | 3 h | medium | **next** · CI is still lint-only; all 435 tests are local-only |
-| 11 | Documentation and interview prep | 2.5 h | easy | |
+| 10 | Full CI/CD | 3 h | medium | ✅ **done** · pytest + Postgres service container · GHCR on main |
+| 11 | Documentation and interview prep | 2.5 h | easy | **next, and last** · lead with **1.36x lift**, not 0.216 |
 
 **If behind schedule, cut in this order** (PLAN §3): drift report, prediction logging,
 API-key auth, CLI wrapper, CatBoost, Optuna (keep `TimeSeriesSplit`), trainer profile.

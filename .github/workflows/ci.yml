@@ -1,5 +1,10 @@
-# Phase 0: lint only. Phase 10 adds pytest with a Postgres service container, the ETL
-# smoke test on a synthetic fixture, and coverage (PLAN.md §10.3).
+# Lint and test (PLAN.md §10.3). The image build and its smoke test live in build.yml, which runs
+# only on main — there is no point pushing an image for a branch that may never merge.
+#
+# CI NEVER NEEDS THE REAL DATASET. It is 121 MB and CC BY-NC-SA. Tests marked `slow` or
+# `integration` assert facts about that data (99,224 review rows, exact leading-zero counts) and are
+# excluded; the `ci_etl` job runs the SAME loader and transform against committed synthetic CSVs in
+# a Postgres service container, so the ETL is exercised for real rather than skipped.
 name: CI
 
 on:
@@ -15,23 +20,24 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # Pinned, not ubuntu-latest: that label migrates to Ubuntu 26 on 2026-10-19 and 24.04 is what the
+  # dev VM runs. Same reasoning as pinning the interpreter — CI should not change under us.
+  PYTHON_VERSION: "3.12"
+
 jobs:
   lint:
     name: ruff + black
-    # Pinned, not ubuntu-latest: the ubuntu-latest label migrates to Ubuntu 26 on
-    # 2026-10-19, and 24.04 is what the dev VM runs. Same reasoning as pinning the
-    # interpreter to 3.12 (PLAN.md §11) — CI should not change under us mid-project.
     runs-on: ubuntu-24.04
     steps:
-      # v7: v4/v5 still target Node 20, which GitHub now force-runs on Node 24 and
-      # warns about on every run.
+      # v7: v4/v5 still target Node 20, which GitHub now force-runs on Node 24 and warns about.
       - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v7
         with:
-          # Must match PLAN.md §11, the venv, python:3.12-slim and CLAUDE.md. A lockfile
-          # is only valid for the interpreter that produced it (§18 A7).
-          python-version: "3.12"
+          # Must match PLAN.md §11, the venv, python:3.12-slim and CLAUDE.md. A lockfile is only
+          # valid for the interpreter that produced it (§18 A7).
+          python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
           cache-dependency-path: requirements-dev.txt
 
@@ -45,3 +51,86 @@ jobs:
 
       - name: black --check
         run: black --check .
+
+  test:
+    name: pytest
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: delay
+          POSTGRES_PASSWORD: ci_only_not_a_secret
+          POSTGRES_DB: delay
+        ports:
+          - 5432:5432
+        # Without this the job races the database on a cold start, which is §13's named mistake in
+        # its CI form. The service is only reachable once it reports healthy.
+        options: >-
+          --health-cmd "pg_isready -U delay -d delay"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      POSTGRES_USER: delay
+      # Not a secret: this database exists for the length of one job, holds only synthetic rows,
+      # and is never reachable from outside the runner. Writing it in the open is clearer than
+      # implying, via a repository secret, that something here needs protecting.
+      POSTGRES_PASSWORD: ci_only_not_a_secret
+      POSTGRES_DB: delay
+      POSTGRES_HOST: 127.0.0.1
+      POSTGRES_PORT: 5432
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install the full stack
+        # requirements.txt, not requirements-api.txt: the tests fit small models, so they need the
+        # training libraries. The serving subset is what the IMAGE installs, and build.yml proves
+        # that separately.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Unit and contract tests
+        # Everything that needs neither the dataset nor a pre-loaded database. Coverage is measured
+        # here because this is the pass that touches most of src/.
+        run: |
+          pytest -m "not integration and not slow and not ci_etl" \
+            --cov=src --cov-report=term-missing --cov-report=xml
+
+      - name: ETL smoke test on synthetic fixtures
+        # The part §10.3 calls "the part that looks like real CI, and it's cheap": the real loader
+        # and the real transform, against nine generated CSVs, in a database this test creates and
+        # drops itself.
+        run: pytest -m ci_etl -p no:cacheprovider --no-cov
+
+      - name: Coverage summary
+        if: always()
+        run: |
+          {
+            echo "### Coverage"
+            echo
+            echo '```'
+            coverage report --skip-covered --sort=cover | tail -25
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: What CI deliberately did not run
+        if: always()
+        # Stated in the job summary rather than left implicit. A green badge that quietly skipped
+        # the dataset-dependent tests would overstate what it proves.
+        run: |
+          {
+            echo "### Not run here, on purpose"
+            echo
+            echo "- \`integration\` and \`slow\`: they assert facts about the real 121 MB"
+            echo "  CC BY-NC-SA Olist dataset, which CI will never hold."
+            echo "- The live-container tests in \`tests/test_docker.py\` need a running"
+            echo "  \`delay-api\`; \`build.yml\` covers the image end to end instead."
+          } >> "$GITHUB_STEP_SUMMARY"

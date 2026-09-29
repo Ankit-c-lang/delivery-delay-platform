@@ -1513,3 +1513,71 @@ cannot unpickle its own model — on top of the `libgomp1` lesson from D41, wher
 library also changed the image's *system* packages. Promotion is not an alias move: it is an alias
 move plus an image that can load what the alias points at. The gate does not currently check that,
 which is the most useful thing Phase 9 learned about its own limits.
+
+---
+
+## D43
+### CI runs the real ETL on synthetic CSVs, and the fixture model is generated rather than committed
+**Date.** 2026-09-29 (Phase 10)
+
+**The constraint.** CI can never hold the Olist dataset: 121 MB and CC BY-NC-SA. But §10.3 is right
+that a Postgres service container running the ETL for real "is the part that looks like real CI, and
+it's cheap", and a green badge that skipped the ETL would say nothing about the code that meets real
+data.
+
+**Decision 1 — nine synthetic raw CSVs, generated from the loader's own specs.**
+`tests/fixtures/synthetic_olist.py` writes all nine Olist files with headers taken from
+`src.etl.load_raw.SPECS` rather than restated, so a schema change breaks the generator instead of
+quietly producing files the loader rejects. `load_all` then reads them exactly as it reads the real
+ones, and `build_orders` transforms them. Nine tests, 4.4 seconds.
+
+Three properties are deliberate, because each keeps a code path alive that a convenient fixture
+would kill:
+
+- **An embedded newline in one review comment in ten.** The fixture's reviews file has **265
+  physical lines and 240 logical rows**, reproducing invariant 11's trap — the real file's 104,719
+  lines against 99,224 rows. A loader that counted lines would now fail a test rather than look
+  correct.
+- **Leading zeros in zip prefixes.** `01001` must survive as TEXT; a fixture using integers would
+  let a regression to `INTEGER` pass.
+- **Genuine nulls in nullable product columns**, so the COPY path and the imputation both see a real
+  absence rather than a zero.
+
+**It builds and drops its own database.** Marked `ci_etl`, not `integration`, because running the
+loader with `recreate=True` against the configured database would destroy a developer's own loaded
+data — fine in a disposable CI container, unacceptable locally. The test creates
+`delay_ci_smoke_<pid>`, points `src.db` at it, and drops it in teardown. Verified afterwards that
+`features.orders_analytical` still held its 96,203 real rows and no scratch database leaked.
+
+**Decision 2 — the `integration` marker's description was wrong, and is fixed.** It said "needs a
+live Postgres or MLflow server". Those tests assert facts about the **real data** — 99,224 review
+rows, exact leading-zero counts — so they need a server *already loaded with it*, and a service
+container alone does not help them. The marker now says so. This matters because the old wording
+implied CI could run them by adding a service, which would have produced a confusing red build and
+an afternoon of debugging the wrong thing.
+
+**Decision 3 — the fixture model is generated, not committed.** §10.3 asks for "a tiny pre-trained
+fixture model (a 10-tree LightGBM, a few KB)" in the repo. `scripts/make_fixture_model.py` builds
+one instead, and the reason is a failure mode the committed version has:
+
+A pickle in git is a **binary coupled to the library versions that wrote it**, and nothing in the
+repository records that coupling. The day LightGBM or MLflow moves, it either stops loading with an
+error far from its cause, or loads and behaves subtly differently. Neither shows up in a diff.
+Generating it costs about a second, cannot drift from the code that reads it, and — because CI runs
+the script with **`requirements-api.txt`** — is written by exactly the libraries the image installs.
+The fixture and the container share their versions by construction rather than by hope. Same
+reasoning as keeping the feature matrix out of the database (D24): a stored derivative drifts from
+the thing that derives it.
+
+**Decision 4 — the image smoke test compares probabilities bitwise.** A build step that checks the
+image exists proves nothing; one that checks `/health` returns 200 proves the web framework starts.
+`build.yml` records the fixture model's prediction on a golden record, then asserts the container
+returns **that exact float**. Verified locally against the real image at
+`0.07142857142857142` on both sides. It also asserts an unseen category returns 200 with a warning
+naming the value, malformed input returns 422 rather than 500, and the container runs as uid 1000.
+A broken model load, a pruned dependency that shifts numerics, or preprocessing that silently no-ops
+all fail before anything is published.
+
+**CI is not CD, and the README says so.** CI is lint plus tests plus build plus smoke. CD here is
+*publish a versioned, smoke-tested artifact to GHCR*, plus a one-command Compose deploy on a machine
+someone owns. There is no hosted environment, and §10.3 is explicit that a CV must not imply one.

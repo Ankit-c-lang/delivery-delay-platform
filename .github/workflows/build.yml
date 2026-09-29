@@ -1,0 +1,222 @@
+# Build the API image, smoke-test it, and publish to GHCR (PLAN.md §10.3).
+#
+# CD HERE MEANS "PUBLISH A VERSIONED, SMOKE-TESTED ARTIFACT", NOT "DEPLOY".
+# §10.3 is explicit that there is no hosted environment and that a CV must not imply one. What this
+# workflow guarantees is that the image on GHCR was built from this commit and provably loaded a
+# model and returned a correct prediction before it was pushed. Deployment is `docker compose up`
+# on a machine someone owns, after `make bootstrap` (§18 A5).
+#
+# THE SMOKE TEST COMPARES PREDICTIONS, NOT STATUS CODES.
+# A build step that checks the image exists proves nothing, and one that checks /health returns 200
+# proves the web framework starts. This one generates a fixture model with the SAME requirements the
+# image installs, records its prediction on a golden record, then asserts the container returns that
+# probability bitwise. A broken model load, a pruned dependency that changes numerics, or
+# preprocessing that silently no-ops all fail here rather than in production.
+name: Build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}/delay-api
+
+jobs:
+  build:
+    name: build, smoke-test, publish
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-api.txt
+
+      - name: Install the SERVING subset only
+        # requirements-api.txt, deliberately: the fixture model must be written by the same library
+        # versions the image installs, or a bitwise comparison against the container would be
+        # comparing two environments and reporting it as a model fault.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-api.txt
+
+      - name: Build the image
+        # Plain docker build, no buildx cache: this image is built once per push to main and the
+        # cache plumbing would cost more reading than it saves in minutes.
+        run: docker build -t "$IMAGE:${{ github.sha }}" -t "$IMAGE:latest" .
+
+      - name: Report the image size
+        run: |
+          size=$(docker image inspect "$IMAGE:${{ github.sha }}" --format '{{.Size}}')
+          human=$(numfmt --to=iec --suffix=B "$size")
+          {
+            echo "### Image"
+            echo
+            echo "\`$IMAGE:${{ github.sha }}\` — **$human**"
+            echo
+            echo "Serving subset only: no optuna, shap, matplotlib, catboost, xgboost, pandera,"
+            echo "sqlalchemy or psycopg2. The dependency list was measured, not assumed"
+            echo "(\`DECISIONS.md\` D38)."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Generate the fixture model and its reference prediction
+        # No registry exists here, so the container is pointed at a local path — the third of §9's
+        # three MODEL_URI forms, which exists for exactly this.
+        run: |
+          python -m scripts.make_fixture_model "$RUNNER_TEMP/fixture_model" \
+            --reference "$RUNNER_TEMP/reference.json"
+          cat "$RUNNER_TEMP/reference.json"
+
+      - name: Run the container
+        run: |
+          docker run -d --name delay-api-smoke \
+            -p 8001:8000 \
+            -e MODEL_URI=/model \
+            -e LOG_LEVEL=INFO \
+            -v "$RUNNER_TEMP/fixture_model:/model:ro" \
+            "$IMAGE:${{ github.sha }}"
+
+      - name: Wait for healthy
+        # Reads the container's own HEALTHCHECK rather than polling the port, so the image's
+        # healthcheck is under test too — it is what Compose and any orchestrator will trust.
+        run: |
+          for attempt in $(seq 1 40); do
+            status=$(docker inspect -f '{{.State.Health.Status}}' delay-api-smoke 2>/dev/null || echo missing)
+            echo "attempt $attempt: $status"
+            if [ "$status" = "healthy" ]; then exit 0; fi
+            if [ "$status" = "unhealthy" ]; then
+              echo "::error::the container reported unhealthy"
+              docker logs delay-api-smoke
+              exit 1
+            fi
+            sleep 3
+          done
+          echo "::error::the container never reported healthy"
+          docker logs delay-api-smoke
+          exit 1
+
+      - name: Smoke test — /health, /model/info, and a bitwise prediction comparison
+        run: |
+          set -euo pipefail
+
+          echo "--- /health"
+          health=$(curl -sf http://127.0.0.1:8001/health)
+          echo "$health"
+          python - "$health" <<'PY'
+          import json, sys
+          body = json.loads(sys.argv[1])
+          assert body["model_loaded"] is True, "the container is serving without a model"
+          assert body["status"] == "ok", body
+          PY
+
+          echo "--- /model/info"
+          info=$(curl -sf http://127.0.0.1:8001/model/info)
+          echo "$info"
+          python - "$info" <<'PY'
+          import json, sys
+          body = json.loads(sys.argv[1])
+          assert body["n_features"] > 0, body
+          assert body["threshold"] > 0, "a model with no operating point cannot make a decision"
+          assert body["has_calibrator"] is True, "the pyfunc lost its calibrator"
+          assert "purchase_month" in body["rejected_columns"], (
+              "purchase_month must be refused, not requested (DECISIONS.md D34)"
+          )
+          PY
+
+          echo "--- /predict against the reference"
+          python - "$RUNNER_TEMP/reference.json" <<'PY'
+          import json, sys, urllib.request
+          from scripts.make_fixture_model import GOLDEN_RECORD
+
+          reference = json.loads(open(sys.argv[1]).read())
+          request = urllib.request.Request(
+              "http://127.0.0.1:8001/predict",
+              data=json.dumps(GOLDEN_RECORD).encode(),
+              headers={"Content-Type": "application/json"},
+          )
+          with urllib.request.urlopen(request, timeout=60) as response:
+              assert response.status == 200, response.status
+              served = json.loads(response.read())
+          print("container:", served)
+          print("reference:", reference)
+
+          # Bitwise. The same artifact and the same record have no licence to differ between the
+          # runner and the container; a tolerance here would hide exactly the dependency-pruning
+          # bug this comparison exists to catch.
+          assert served["probability"] == reference["probability"], (
+              f"container {served['probability']!r} != runner {reference['probability']!r}"
+          )
+          assert served["threshold"] == reference["threshold"]
+          assert served["is_late_predicted"] == reference["is_late_predicted"]
+          assert 0.0 < served["probability"] < 1.0, (
+              "a probability of exactly 0 or 1 means the model degenerated, not that it is confident"
+          )
+          assert served["warnings"] == [], served["warnings"]
+          PY
+
+          echo "--- an unseen category must return 200 with a warning, never a 500"
+          python - <<'PY'
+          import json, urllib.request
+          from scripts.make_fixture_model import GOLDEN_RECORD
+
+          record = {**GOLDEN_RECORD, "dominant_category": "quantum_widgets"}
+          request = urllib.request.Request(
+              "http://127.0.0.1:8001/predict",
+              data=json.dumps(record).encode(),
+              headers={"Content-Type": "application/json"},
+          )
+          with urllib.request.urlopen(request, timeout=60) as response:
+              assert response.status == 200, response.status
+              body = json.loads(response.read())
+          assert body["warnings"], "an unrecognised category produced no warning"
+          assert any("quantum_widgets" in line for line in body["warnings"]), body["warnings"]
+          print("warned:", body["warnings"])
+          PY
+
+          echo "--- malformed input must be 422, not 500"
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+            -H 'Content-Type: application/json' -d '{"promised_days": "many"}' \
+            http://127.0.0.1:8001/predict)
+          test "$code" = "422" || { echo "::error::expected 422, got $code"; exit 1; }
+
+          echo "--- the container must not be running as root"
+          uid=$(docker exec delay-api-smoke id -u)
+          test "$uid" = "1000" || { echo "::error::running as uid $uid"; exit 1; }
+
+      - name: Container logs
+        if: always()
+        run: docker logs delay-api-smoke || true
+
+      - name: Stop the container
+        if: always()
+        run: docker rm -f delay-api-smoke || true
+
+      - name: Log in to GHCR
+        # GITHUB_TOKEN is enough; GHCR needs no separate account or stored credential.
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Push :latest and :{sha}
+        # Only reached when every assertion above passed, which is the point: nothing is published
+        # that has not proved it can load a model and return the right number.
+        run: |
+          docker push "$IMAGE:${{ github.sha }}"
+          docker push "$IMAGE:latest"
+          {
+            echo
+            echo "Published \`$IMAGE:${{ github.sha }}\` and \`:latest\` after the smoke test passed."
+            echo
+            echo "**This is not a deployment.** There is no hosted environment; CD here means a"
+            echo "versioned, smoke-tested artifact in a registry, plus a one-command Compose"
+            echo "deploy on a machine someone owns (\`make bootstrap\` first — §18 A5)."
+          } >> "$GITHUB_STEP_SUMMARY"
