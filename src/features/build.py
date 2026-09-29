@@ -94,17 +94,24 @@ STATE_TO_REGION: dict[str, str] = {
     "SC": "S",
 }
 
-#: The 39 features, in the order the matrix must always present them (§6.6: column order
-#: must match the artifact's stored list exactly).
-FEATURE_NAMES: tuple[str, ...] = (
-    # --- F1 promise and timing (6) -------------------------------------------------
+#: The eight families of §5, named rather than sliced by index, so the report and the tests
+#: cannot drift from the list when a feature is added or removed.
+#:
+#: ``purchase_month`` was **removed** after the Phase 5 audit (DECISIONS.md D29). It was the
+#: top feature by SHAP and could not have been learned: under the §4.4 forward split no
+#: calibration window shares a single calendar month with its fit window, and months 9-12
+#: occur in only one year, so a month effect is perfectly confounded with whatever happened
+#: operationally that year. The other three timing features stay, because their cycles repeat
+#: often enough inside the window to be estimated — 87 weeks for day-of-week against 1.67
+#: years for month-of-year.
+F1_PROMISE_TIMING: tuple[str, ...] = (
     "promised_days",
     "purchase_hour",
     "purchase_dayofweek",
-    "purchase_month",
     "is_weekend",
     "days_to_shipping_limit",
-    # --- F2 geography (7) ----------------------------------------------------------
+)
+F2_GEOGRAPHY: tuple[str, ...] = (
     "customer_state",
     "seller_state",
     "same_state",
@@ -112,38 +119,62 @@ FEATURE_NAMES: tuple[str, ...] = (
     "haversine_km",
     "n_distinct_seller_states",
     "customer_zip_prefix_2",
-    # --- F3 order composition (6) --------------------------------------------------
+)
+F3_ORDER_COMPOSITION: tuple[str, ...] = (
     "n_items",
     "n_distinct_products",
     "n_distinct_sellers",
     "total_price",
     "total_freight",
     "freight_ratio",
-    # --- F4 product physical (6) ---------------------------------------------------
+)
+F4_PRODUCT_PHYSICAL: tuple[str, ...] = (
     "total_weight_g",
     "max_item_weight_g",
     "total_volume_cm3",
     "max_item_volume_cm3",
     "avg_density",
     "product_category",
-    # --- F5 payment (4) ------------------------------------------------------------
+)
+F5_PAYMENT: tuple[str, ...] = (
     "payment_type",
     "max_installments",
     "payment_value",
     "n_payment_methods",
-    # --- F6 seller history, as-of (5) ----------------------------------------------
+)
+F6_SELLER_HISTORY: tuple[str, ...] = (
     "seller_order_count_hist",
     "seller_late_rate_hist",
     "seller_avg_delivery_days_hist",
     "seller_avg_handling_days_hist",
     "seller_is_new",
-    # --- F7 route history, as-of (3) -----------------------------------------------
+)
+F7_ROUTE_HISTORY: tuple[str, ...] = (
     "route_order_count_hist",
     "route_late_rate_hist",
     "route_avg_delivery_days_hist",
-    # --- F8 category history, as-of (2) --------------------------------------------
+)
+F8_CATEGORY_HISTORY: tuple[str, ...] = (
     "category_late_rate_hist",
     "category_avg_delivery_days_hist",
+)
+
+#: Family label -> members, in report order.
+FEATURE_FAMILIES: dict[str, tuple[str, ...]] = {
+    "F1 promise and timing": F1_PROMISE_TIMING,
+    "F2 geography": F2_GEOGRAPHY,
+    "F3 order composition": F3_ORDER_COMPOSITION,
+    "F4 product physical": F4_PRODUCT_PHYSICAL,
+    "F5 payment": F5_PAYMENT,
+    "F6 seller history (as-of)": F6_SELLER_HISTORY,
+    "F7 route history (as-of)": F7_ROUTE_HISTORY,
+    "F8 category history (as-of)": F8_CATEGORY_HISTORY,
+}
+
+#: The features, in the order the matrix must always present them (§6.6: column order must
+#: match the artifact's stored list exactly). 38 after D29.
+FEATURE_NAMES: tuple[str, ...] = tuple(
+    name for members in FEATURE_FAMILIES.values() for name in members
 )
 
 #: Features that must carry pandas ``category`` dtype. §6.1 uses each library's native
@@ -278,9 +309,9 @@ def construct_features(
     out["promised_days"] = orders["promised_days"].astype("float64")
     out["purchase_hour"] = purchased.dt.hour.astype("int16")
     out["purchase_dayofweek"] = purchased.dt.dayofweek.astype("int16")
-    # Calendar month 1-12, a seasonality proxy. NOT the snapshot join key of the same name
-    # in orders_analytical, which is a first-of-month timestamp.
-    out["purchase_month"] = purchased.dt.month.astype("int16")
+    # No calendar-month feature. `orders_analytical` still has a `purchase_month` column — a
+    # first-of-month timestamp used to join as-of snapshots — but it is deliberately not a
+    # feature (DECISIONS.md D29).
     out["is_weekend"] = (purchased.dt.dayofweek >= 5).astype("bool")
     # Winsorised: the raw column runs to 1,052 days against a train p99 of 19 (§18 A4).
     out["days_to_shipping_limit"] = (
@@ -451,16 +482,7 @@ def write_feature_report(
     artifact, matrix: pd.DataFrame, raw_matrix: pd.DataFrame, path: Path = FEATURE_REPORT
 ) -> None:
     """Write the feature inventory and pre-imputation null counts to ``reports/``."""
-    families = [
-        ("F1 promise and timing", FEATURE_NAMES[0:6]),
-        ("F2 geography", FEATURE_NAMES[6:13]),
-        ("F3 order composition", FEATURE_NAMES[13:19]),
-        ("F4 product physical", FEATURE_NAMES[19:25]),
-        ("F5 payment", FEATURE_NAMES[25:29]),
-        ("F6 seller history (as-of)", FEATURE_NAMES[29:34]),
-        ("F7 route history (as-of)", FEATURE_NAMES[34:37]),
-        ("F8 category history (as-of)", FEATURE_NAMES[37:39]),
-    ]
+    families = list(FEATURE_FAMILIES.items())
     lines = [
         "# Feature matrix",
         "",

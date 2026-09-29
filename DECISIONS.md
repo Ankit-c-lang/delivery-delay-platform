@@ -36,8 +36,9 @@ duplicated** — §18 is the authority, and two copies would drift apart.
 | [D26](#d26) | Per-fold PR-AUC tracks the base rate, so lift is the comparable number | 2026-09-28 |
 | [D27](#d27) | Ship LightGBM as the lead model; `scale_pos_weight` made it worse | 2026-09-28 |
 | [D28](#d28) | Split the calibration window interleaved, not temporally | 2026-09-29 |
-| [D29](#d29) | `purchase_month` cannot generalise forward — drop it (decision pending) | 2026-09-29 |
-| [D30](#d30) | Ship the single model: the blend collapsed onto one model | 2026-09-29 |
+| [D29](#d29) | `purchase_month` cannot generalise forward — **dropped**, 38 features | 2026-09-29 |
+| [D30](#d30) | Ship the single model, not the blend (superseded by D31 on the model) | 2026-09-29 |
+| [D31](#d31) | After dropping `purchase_month`: ship XGBoost | 2026-09-29 |
 
 ---
 
@@ -805,6 +806,48 @@ instead of one and is not in §5, so it needs a decision too.
 top feature is structurally unable to generalise forward would put a known defect behind an
 `@champion` alias.
 
+### Resolved: dropped, leaving 38 features
+
+Cyclical encoding was rejected. `sin`/`cos` would place month 1 adjacent to month 12 and soften
+the *extrapolation*, but it cannot create a second November. Months 9-12 occur in exactly one
+year each, so a month effect stays perfectly confounded with that year's operations whatever the
+encoding. It treats the readout, not the cause — and it adds a feature §5 does not list.
+
+**The line now drawn, and it is not ad hoc:** a cyclical time feature is kept when its cycle
+repeats often enough inside the window to be separated from the trend.
+
+| Feature | Cycles observed in the data | Kept? |
+|---|---:|---|
+| `purchase_hour` | ~600 days | yes |
+| `purchase_dayofweek`, `is_weekend` | **87 weeks** | yes |
+| `purchase_month` | **1.67 years** | **no** |
+
+**What actually happened, measured.** Cross-validated PR-AUC on the fit window improved for
+**every** GBDT:
+
+| Model | 39 features | 38 features | change |
+|---|---:|---:|---:|
+| LightGBM | 0.15278 | **0.15331** | +0.00053 |
+| CatBoost | 0.14893 | **0.14997** | +0.00104 |
+| XGBoost | 0.14675 | **0.14694** | +0.00019 |
+| _logistic regression_ | 0.13567 | 0.13545 | −0.00022 |
+
+**One number went down, and it should have.** Best single-model PR-AUC on the calibration window
+fell from 0.22455 (CatBoost, 39 features) to 0.21520 (XGBoost, 38). That is the point rather than
+a regression: CatBoost's old score was inflated by routing out-of-range months to a branch that
+happened to help. Remove the accident and the inflated number goes with it, while the honest
+metric — cross-validation, where every fold sees months in range — improves for all three.
+
+**The replacement top feature is structurally sound**, which is the cleanest confirmation the
+pathology was specific. `customer_zip_prefix_2` now ranks first at mean |SHAP| 0.319, and its
+overlap is **98 of 98** calibration-time values seen in training, against `purchase_month`'s
+**0 of 2**. Its own leave-one-out audit is genuinely mixed (+0.009 CatBoost, +0.003 LightGBM,
+−0.007 XGBoost), so there is no case to drop it — and the model that ships is the one that wants
+it. `promised_days` also rose from 6th to 5th.
+
+The feature audit is a reproducible function that audits **whatever SHAP ranks first**, so this
+check survives the change rather than being a one-off about one feature.
+
 ## D30
 ### Ship the single model: the blend collapsed onto one model
 **Decision.** Ship **CatBoost** alone. The ensemble is kept as a logged experiment, exactly as
@@ -846,3 +889,48 @@ than one chosen on deployment-era data would be.
 gap of **2.019 review-score points**. 100% of orders in the population carry a review. Reviews
 are used for this analysis only; `review_impact()` asserts no review column has reached the
 feature matrix before returning a number.
+
+## D31
+### After dropping `purchase_month`: ship XGBoost
+**Decision.** Ship **XGBoost** alone. This supersedes D30's choice of model; D30's *reasoning* —
+ship the single model, keep the ensemble as a logged experiment — stands unchanged.
+
+**Measured** on the weight-fitting half of v1's calibration window, 38 features:
+
+| | PR-AUC | Blend weight |
+|---|---:|---:|
+| **XGBoost** | **0.21520** | 0.2328 |
+| CatBoost | 0.20850 | 0.7672 |
+| LightGBM | 0.20219 | 0.0000 |
+| blend | 0.21364 | — |
+| **delta vs best single** | **−0.00156** | |
+
+**The blend is now a genuine two-model blend** — weights 0.77 CatBoost / 0.23 XGBoost, not D30's
+corner solution — **and it is still worse than the best single model on PR-AUC.** That is the
+caveat this module documents from the start: weights are fitted by minimising log-loss because it
+is smooth under the simplex constraint, and a log-loss-optimal blend can rank marginally worse.
+CatBoost carries most of the weight because its probabilities are better *scaled*; XGBoost wins
+because it *ranks* better. PR-AUC measures ranking.
+
+So the ensemble loses on both counts, and the single model ships with a negative delta rather than
+a small positive one.
+
+**Calibration**, on held-out rows: Brier **0.085314 -> 0.084070**. Slightly less improvement than
+the 39-feature run (−0.00124 against −0.00207), which is consistent — there is less
+miscalibration left to fix once the out-of-range feature is gone.
+
+**Threshold moved, and in the direction that makes sense.** Under the same assumed 5:1 FN:FP cost
+ratio: **0.21**, catching **36.3%** of late orders at a **13.7%** flag rate with **25.6%**
+precision — against 0.17 / 48.1% / 21.6% / 21.5% before. The model is better calibrated and
+better ranked, so the cost-minimising point tolerates flagging fewer orders. Precision up 4
+points, flag rate down 8. Whether that trade is right depends on the cost ratio, which remains an
+assumption (§4.7).
+
+**Three model rankings, three different winners.** LightGBM on fit-window CV (0.15331), XGBoost on
+the calibration window (0.21520), CatBoost by blend weight (0.77). At margins this small the
+ranking is not stable, which is the argument for letting Phase 9's promotion gate decide on the
+evaluation set rather than trusting any single number here.
+
+**Carry into Phase 6:** the shipped model is XGBoost, so `requirements-api.txt` does **not** need
+`catboost` after all — but it does need `xgboost`, which is what pulls the 305 MB CUDA library
+D14 flagged. `xgboost-cpu` is now directly relevant to the Phase 8 image size.

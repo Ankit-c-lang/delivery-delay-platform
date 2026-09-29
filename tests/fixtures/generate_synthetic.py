@@ -78,8 +78,6 @@ def synthetic_matrix(
             frame[column] = rng.integers(0, 24, n_rows).astype(float)
         elif column in {"purchase_dayofweek"}:
             frame[column] = rng.integers(0, 7, n_rows).astype(float)
-        elif column in {"purchase_month"}:
-            frame[column] = rng.integers(1, 13, n_rows).astype(float)
         else:
             frame[column] = np.abs(rng.normal(100.0, 60.0, n_rows))
 

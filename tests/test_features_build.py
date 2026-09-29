@@ -29,6 +29,7 @@ from src.features.artifact import (
 from src.features.build import (
     BOOLEAN_FEATURES,
     CATEGORICAL_FEATURES,
+    FEATURE_FAMILIES,
     FEATURE_NAMES,
     MISSING,
     NUMERIC_FEATURES,
@@ -151,9 +152,19 @@ def artifact(orders, snapshots) -> PreprocessingArtifact:
 class TestTheFeatureContract:
     """The §5 inventory, and the §4.2 denylist."""
 
-    def test_thirty_nine_features_in_eight_families(self):
-        assert len(FEATURE_NAMES) == 39
-        assert len(set(FEATURE_NAMES)) == 39
+    def test_thirty_eight_features_in_eight_families(self):
+        """38, not §5's 39: `purchase_month` was dropped by the Phase 5 audit (D29)."""
+        assert len(FEATURE_NAMES) == 38
+        assert len(set(FEATURE_NAMES)) == 38
+        assert sum(len(members) for members in FEATURE_FAMILIES.values()) == 38
+
+    def test_the_family_map_and_the_feature_list_cannot_drift(self):
+        """FEATURE_NAMES is built from FEATURE_FAMILIES, so the report cannot describe a
+        different set than the matrix contains. Previously the report sliced FEATURE_NAMES by
+        hard-coded index ranges, which silently mislabelled every family the moment one
+        feature was removed."""
+        flattened = [name for members in FEATURE_FAMILIES.values() for name in members]
+        assert flattened == list(FEATURE_NAMES)
 
     def test_every_feature_is_categorical_boolean_or_numeric_exactly_once(self):
         kinds = list(CATEGORICAL_FEATURES) + list(BOOLEAN_FEATURES) + list(NUMERIC_FEATURES)
@@ -204,14 +215,30 @@ class TestDerivedFeatures:
         assert matrix["purchase_dayofweek"].tolist() == [5, 0]
         assert matrix["is_weekend"].tolist() == [True, False]
 
-    def test_purchase_month_is_the_calendar_month_not_the_snapshot_key(self, levels, bounds):
-        """`purchase_month` is 1-12 here, a seasonality proxy. `orders_analytical` has a
-        column of the same name that is a first-of-month *timestamp* used to join snapshots.
-        Confusing the two would put a nanosecond epoch into the model."""
-        orders = make_orders(2)
-        orders["order_purchase_timestamp"] = pd.to_datetime(["2017-03-15", "2018-11-02"])
+    def test_calendar_month_is_not_a_feature(self, orders, levels, bounds):
+        """D29: `purchase_month` was the top feature by SHAP and could not have been learned.
+
+        Under the §4.4 forward split, no calibration window shares a single calendar month
+        with its fit window (v1 trains on months 5-12 and calibrates on 1-2; v2 calibrates on
+        3-4), and months 9-12 occur in only one year, so a month effect is perfectly
+        confounded with whatever happened operationally that year. Dropping it improved Brier
+        for all three models.
+
+        `orders_analytical` still has a `purchase_month` column — a first-of-month timestamp
+        used to join as-of snapshots — so this test also pins the distinction: the input may
+        carry it, the matrix must not.
+        """
         matrix = construct_features(orders, category_levels=levels, winsor_bounds=bounds)
-        assert matrix["purchase_month"].tolist() == [3, 11]
+        assert "purchase_month" in orders.columns, "the snapshot join key should still exist"
+        assert "purchase_month" not in matrix.columns
+        assert not any("month" in name for name in matrix.columns)
+
+    def test_the_timing_features_that_survived_recur_often_enough_to_be_learned(self):
+        """The line D29 draws: a cyclical time feature is kept when its cycle repeats enough
+        times inside the window to be separated from the trend. Day-of-week recurs over 87
+        weeks and hour over ~600 days; month-of-year gets 1.67 cycles."""
+        for kept in ("purchase_hour", "purchase_dayofweek", "is_weekend"):
+            assert kept in FEATURE_NAMES
 
     def test_same_state_and_region(self, levels, bounds):
         orders = make_orders(2)
@@ -475,7 +502,7 @@ class TestImmutability:
     def test_summary_is_json_serializable(self, artifact):
         import json
 
-        assert json.loads(json.dumps(artifact.summary()))["n_features"] == 39
+        assert json.loads(json.dumps(artifact.summary()))["n_features"] == 38
 
 
 class TestAgainstTheRealData:
@@ -496,7 +523,7 @@ class TestAgainstTheRealData:
 
     def test_matrix_shape_and_no_nulls(self, built):
         matrix = built["matrix"]
-        assert matrix.shape == (96_203, 39)
+        assert matrix.shape == (96_203, 38)
         assert matrix[list(NUMERIC_FEATURES)].isna().sum().sum() == 0
 
     def test_no_denylist_column_in_the_matrix(self, built):

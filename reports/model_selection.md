@@ -6,23 +6,23 @@ trained on, and never the promotion evaluation window, which is locked (§18 A3)
 
 ## The decision
 
-**Ship the single model: `catboost`.** The blend gained +0.0000 PR-AUC over it, which does not clear the 0.005 bar set in `configs/base.yaml`.
+**Ship the single model: `xgboost`.** The blend gained -0.0016 PR-AUC over it, which does not clear the 0.005 bar set in `configs/base.yaml`.
 
 | | PR-AUC |
 |---|---:|
-| `catboost` **(best single)** | 0.22455 |
-| `xgboost` | 0.19523 |
-| `lightgbm` | 0.18981 |
-| **blend** | **0.22455** |
-| delta vs best single | **+0.00000** |
+| `xgboost` **(best single)** | 0.21520 |
+| `catboost` | 0.20850 |
+| `lightgbm` | 0.20219 |
+| **blend** | **0.21364** |
+| delta vs best single | **-0.00156** |
 
 Blend weights, fitted by minimising log-loss (non-negative, summing to 1):
 
 | Model | Weight |
 |---|---:|
-| `catboost` | 1.0000 |
+| `catboost` | 0.7672 |
+| `xgboost` | 0.2328 |
 | `lightgbm` | 0.0000 |
-| `xgboost` | 0.0000 |
 
 ### Why the gain is small, and why that was expected
 
@@ -40,8 +40,8 @@ Isotonic regression, fitted on **6,812** rows (9.67% late) and evaluated on the 
 
 | Brier | Before | After | Change |
 |---|---:|---:|---:|
-| in-sample (flatters) | 0.084706 | 0.082229 | -0.002478 |
-| **held out** | 0.085847 | 0.083776 | -0.002071 |
+| in-sample (flatters) | 0.083964 | 0.081969 | -0.001995 |
+| **held out** | 0.085314 | 0.084070 | -0.001244 |
 
 The held-out row is the honest one. The in-sample figure is reported only to make the
 difference between the two visible.
@@ -58,18 +58,18 @@ through February — which would fit the calibrator on an unrepresentative slice
 
 ## Threshold
 
-Under an assumed 5:1 FN:FP cost ratio, the optimal threshold is 0.17, catching 48.1% of late orders at a 21.6% flag rate (precision 21.5%).
+Under an assumed 5:1 FN:FP cost ratio, the optimal threshold is 0.21, catching 36.3% of late orders at a 13.7% flag rate (precision 25.6%).
 
 | Quantity | Value |
 |---|---:|
-| threshold | **0.1682** |
+| threshold | **0.2069** |
 | assumed FN:FP cost ratio | 5:1 |
-| expected cost per order (FP units) | 0.4206 |
-| precision | 21.54% |
-| recall | 48.10% |
-| flag rate | 21.61% |
-| true positives / false positives | 317 / 1,155 |
-| false negatives / true negatives | 342 / 4,998 |
+| expected cost per order (FP units) | 0.4103 |
+| precision | 25.59% |
+| recall | 36.27% |
+| flag rate | 13.71% |
+| true positives / false positives | 239 / 695 |
+| false negatives / true negatives | 420 / 5,458 |
 
 **The cost ratio is an assumption, not a measurement.** Nothing here was derived from
 Olist's actual support costs; the ratio is a stated premise and the threshold is its
@@ -87,7 +87,7 @@ evaluation set and that is where the number should be judged.
 - **Gap: 2.019 review-score points**
 - Share scoring 1 or 2 stars: 9.2% on-time against **62.4%** late
 
-At the threshold above, catching 48.1% of late orders puts roughly 317 of the calibration window's late deliveries in reach of a proactive intervention. Whether that protects the review is an
+At the threshold above, catching 36.3% of late orders puts roughly 239 of the calibration window's late deliveries in reach of a proactive intervention. Whether that protects the review is an
 assumption this project does not test — it has no experiment, only the correlation.
 
 **Reviews are used for this analysis only.** Every review column is on the §4.2
@@ -96,20 +96,20 @@ returns a single number.
 
 ## SHAP (§6.7)
 
-`TreeExplainer` on **3,000** rows of `catboost`. Additivity check: max |base + sum(shap) - model output| = nan.
+`TreeExplainer` on **3,000** rows of `xgboost`. Additivity check: max |base + sum(shap) - model output| = nan.
 
 | Rank | Feature | Mean \|SHAP\| |
 |---:|---|---:|
-| 1 | `purchase_month` | 0.19772 |
-| 2 | `route_avg_delivery_days_hist` | 0.14866 |
-| 3 | `route_order_count_hist` | 0.06955 |
-| 4 | `seller_avg_handling_days_hist` | 0.06573 |
-| 5 | `customer_state` | 0.06525 |
-| 6 | `promised_days` | 0.05522 |
-| 7 | `haversine_km` | 0.03050 |
-| 8 | `customer_region` | 0.02821 |
-| 9 | `seller_avg_delivery_days_hist` | 0.02784 |
-| 10 | `seller_order_count_hist` | 0.01498 |
+| 1 | `customer_zip_prefix_2` | 0.31871 |
+| 2 | `route_order_count_hist` | 0.19883 |
+| 3 | `route_avg_delivery_days_hist` | 0.16146 |
+| 4 | `seller_avg_handling_days_hist` | 0.11733 |
+| 5 | `promised_days` | 0.10742 |
+| 6 | `customer_state` | 0.08704 |
+| 7 | `product_category` | 0.08091 |
+| 8 | `route_late_rate_hist` | 0.04472 |
+| 9 | `seller_avg_delivery_days_hist` | 0.03964 |
+| 10 | `haversine_km` | 0.03798 |
 
 Plots in `reports/shap/`: beeswarm, mean-|SHAP| bar and the top-3 dependence plots.
 
@@ -122,27 +122,21 @@ of the per-model SHAP values: attributions are additive and a weighted average o
 models is a linear combination, so the attribution of the average is the average of
 the attributions. `blended_shap_values()` is that one line.
 
-## Feature audit: `purchase_month` (§5)
+## Feature audit: `customer_zip_prefix_2` (§5)
 
-SHAP ranked `purchase_month` first, so it is the feature the audit examines.
+SHAP ranked `customer_zip_prefix_2` first, so it is the feature the audit examines.
 
-- Values seen in the **fit** window: `[5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0]`
-- Values seen at **calibration** time: `[1.0, 2.0]`
-- Overlap: **none**
+- Values in the **fit** window: `01`, `02`, `03`, `04`, `05`, `06`, `07`, `08`, `09`, `11`, `12`, `13` … (98 values)
+- Values at **calibration** time: `01`, `02`, `03`, `04`, `05`, `06`, `07`, `08`, `09`, `11`, `12`, `13` … (98 values)
+- **Overlap: 98 of 98** calibration-time values were seen in training
 
 | Model | PR-AUC with | without | delta | Brier with | without |
 |---|---:|---:|---:|---:|---:|
-| `catboost` | 0.21498 | 0.20927 | **-0.00571** | 0.08528 | 0.08374 |
-| `lightgbm` | 0.18755 | 0.20251 | **+0.01496** | 0.08910 | 0.08637 |
-| `xgboost` | 0.19090 | 0.22144 | **+0.03055** | 0.08849 | 0.08461 |
+| `catboost` | 0.20547 | 0.21410 | **+0.00863** | 0.08419 | 0.08501 |
+| `lightgbm` | 0.20301 | 0.20624 | **+0.00323** | 0.08854 | 0.08570 |
+| `xgboost` | 0.21472 | 0.20785 | **-0.00687** | 0.08464 | 0.08746 |
 
 Each row is a genuine leave-one-out refit on the fit window, scored on the whole
 calibration window — not permutation importance. Permutation tells you what the
 model *used*; this tells you what it is *worth* without the feature, which is the
 question when deciding to remove it.
-
-**This feature has no value overlap between training and scoring.** It cannot
-have been learned: a tree routes an unseen value to whichever branch the last
-split left open, so any apparent benefit is an accident of geometry rather than
-a learned effect. See `DECISIONS.md` D29 — this needs a decision before Phase 6
-registers a model.

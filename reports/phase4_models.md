@@ -11,10 +11,10 @@ Training rows: **36,174** · base rate **0.0585** · `TimeSeriesSplit(n_splits=4
 | Model | CV PR-AUC | Lift over base rate | Trials | Wall clock |
 |---|---:|---:|---:|---:|
 | _majority_class_ | 0.06559 | 1.12x | - | - |
-| _logistic_regression_ | 0.13567 | 2.32x | - | - |
-| **lightgbm** | **0.15278** | 2.61x | 40/40 | 119s |
-| **catboost** | **0.14893** | 2.55x | 20/20 | 363s |
-| **xgboost** | **0.14675** | 2.51x | 40/40 | 110s |
+| _logistic_regression_ | 0.13545 | 2.32x | - | - |
+| **lightgbm** | **0.15331** | 2.62x | 40/40 | 101s |
+| **catboost** | **0.14997** | 2.56x | 20/20 | 309s |
+| **xgboost** | **0.14694** | 2.51x | 40/40 | 124s |
 
 ## Read the per-fold scores against the per-fold base rate
 
@@ -25,10 +25,10 @@ fold PR-AUC is +0.80**. Lift (PR-AUC / base rate) is the fold-comparable number.
 
 | Fold | Val rows | Base rate | lightgbm PR-AUC / lift | xgboost PR-AUC / lift | catboost PR-AUC / lift |
 |---|---:|---:|---:|---:|---:|
-| 1 | 7,234 | 0.0282 | 0.0547 / 1.94x | 0.0592 / 2.10x | 0.0484 / 1.72x |
-| 2 | 7,234 | 0.0417 | 0.1052 / 2.52x | 0.0959 / 2.30x | 0.0990 / 2.37x |
-| 3 | 7,234 | 0.0959 | 0.1471 / 1.53x | 0.1417 / 1.48x | 0.1526 / 1.59x |
-| 4 | 7,234 | 0.0965 | 0.3040 / 3.15x | 0.2901 / 3.01x | 0.2956 / 3.06x |
+| 1 | 7,234 | 0.0282 | 0.0706 / 2.50x | 0.0615 / 2.18x | 0.0538 / 1.91x |
+| 2 | 7,234 | 0.0417 | 0.1114 / 2.67x | 0.0917 / 2.20x | 0.1048 / 2.51x |
+| 3 | 7,234 | 0.0959 | 0.1453 / 1.51x | 0.1482 / 1.54x | 0.1485 / 1.55x |
+| 4 | 7,234 | 0.0965 | 0.2860 / 2.96x | 0.2864 / 2.97x | 0.2928 / 3.03x |
 
 **The model is weakest exactly when it matters most.** Fold 3 covers November
 2017, the Black Friday spike: it has the highest base rate and the *lowest* lift.
@@ -44,45 +44,45 @@ deployed forward in time, but it is a choice, not a neutral average.
 
 ## Best hyperparameters
 
-**lightgbm** — per-fold PR-AUC [0.05472885601241964, 0.10523097824199143, 0.1471470743293995, 0.30403055231465514]
+**lightgbm** — per-fold PR-AUC [0.0705504696639688, 0.11138712259249302, 0.1453008529725674, 0.28601272777813946]
 
 ```yaml
-bagging_fraction: 0.7206806613968921
-bagging_freq: 1
-feature_fraction: 0.5292682201940915
-lambda_l2: 0.6992908861055562
-learning_rate: 0.012905748927143097
-min_child_samples: 179
-num_leaves: 59
+bagging_fraction: 0.8590444554652396
+bagging_freq: 3
+feature_fraction: 0.5298842187301288
+lambda_l2: 0.564733304605502
+learning_rate: 0.010975616252039534
+min_child_samples: 8
+num_leaves: 19
 ```
 
-**xgboost** — per-fold PR-AUC [0.05921104392833486, 0.09594537769566538, 0.14171388657839748, 0.29011974248586636]
+**xgboost** — per-fold PR-AUC [0.06151884730800666, 0.09168811341090283, 0.1481784571110642, 0.2863687801384002]
 
 ```yaml
-colsample_bytree: 0.5102240374123014
-learning_rate: 0.019431607130198536
-max_depth: 9
-min_child_weight: 29.26771965721245
-reg_lambda: 3.943187269988547
-subsample: 0.8353622580163879
+colsample_bytree: 0.5862619542805796
+learning_rate: 0.013270744671656502
+max_depth: 8
+min_child_weight: 4.01300334117529
+reg_lambda: 3.9289372744175166
+subsample: 0.794373360860246
 ```
 
-**catboost** — per-fold PR-AUC [0.04843805988369342, 0.09900461148245117, 0.1526360046868869, 0.29563829967741795]
+**catboost** — per-fold PR-AUC [0.05379690161257161, 0.10476256895445435, 0.14850745213854874, 0.29280250372693245]
 
 ```yaml
-bagging_temperature: 0.07115875063212852
-depth: 8
-l2_leaf_reg: 6.557546361565695
-learning_rate: 0.026890158296528327
-random_strength: 0.21910819138636098
+bagging_temperature: 0.01570324926967833
+depth: 6
+l2_leaf_reg: 5.499415228774075
+learning_rate: 0.0881173692505046
+random_strength: 2.7731320015939183
 ```
 
 ## `scale_pos_weight`, tested rather than assumed (§6.4)
 
 LightGBM at its tuned parameters, refitted with `scale_pos_weight=16.1`:
 
-- PR-AUC **0.14564** against 0.15278 unweighted (**-0.00714**)
-- Per fold: [0.05211, 0.09837, 0.14793, 0.28415]
+- PR-AUC **0.14506** against 0.15331 unweighted (**-0.00826**)
+- Per fold: [0.06153, 0.08657, 0.14499, 0.28713]
 
 No resampling anywhere. Train on raw probabilities, calibrate in Phase 5, then
 tune the threshold — reweighting the loss moves the probabilities without

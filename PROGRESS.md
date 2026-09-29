@@ -5,94 +5,101 @@ that task. Source of truth for *what* to build is `PLAN.md`; this file only trac
 are*. Decisions and their reasons live in `DECISIONS.md`.
 
 - **Plan version:** v1 (2026-09-28) + amendments §18 · **Pre-flight completed:** 2026-09-28
-- **Current phase:** Phase 5 — Ensemble, calibration, threshold · **✅ COMPLETE**, with one
-  decision left open (D29, `purchase_month`)
-- **Overall:** **6 / 12 phases** · 302 tests green
+- **Current phase:** Phase 5 — Ensemble, calibration, threshold · **✅ COMPLETE**, and D29 is
+  now resolved: `purchase_month` dropped, **38 features**
+- **Overall:** **6 / 12 phases** · 304 tests green
 - **Estimated remaining:** ~20 h of build work (PLAN §3 budget: 36-42 h)
 
 ---
 
 ## Currently working on
 
-**Nothing in flight. Phase 5 is complete** — but it surfaced one thing that needs your decision
-before Phase 6.
+**Nothing in flight. Phase 5 is complete and D29 is resolved.**
 
-### ⚠️ The open decision: `purchase_month` cannot generalise forward (D29)
+### `purchase_month` dropped — 38 features
 
-SHAP ranked `purchase_month` the **#1 feature** at mean |SHAP| 0.198, a third above the second.
-It should not be there:
+It was #1 by SHAP (mean |SHAP| 0.198) and could not have been learned. Under the §4.4 forward
+split **no calibration window shares a single calendar month with its fit window** (v1 trains on
+5-12 and calibrates on 1-2; v2 calibrates on 3-4), and months 9-12 occur in **exactly one year**,
+so a month effect is perfectly confounded with that year's operations. November 2017 *is* the Black
+Friday spike and it is the only November in the data.
 
-- fit-window values: **{5, 6, 7, 8, 9, 10, 11, 12}**
-- calibration-window values: **{1, 2}**
-- **overlap: none**
+**Cyclical encoding was rejected.** `sin`/`cos` would put month 1 beside month 12 and soften the
+extrapolation, but it cannot create a second November — the confounding survives any encoding. It
+treats the readout, not the cause.
 
-The top feature takes values at scoring time it never saw in training. A tree cannot have learned
-month 1 — it routes an unseen value to whichever branch the last split left open, so any apparent
-benefit is geometry, not seasonality.
+**The line now drawn**, which also explains why the other timing features stayed:
 
-A leave-one-out refit (real refits, not permutation importance) settles it:
+| Feature | Cycles observed | Kept? |
+|---|---:|---|
+| `purchase_hour` | ~600 days | yes |
+| `purchase_dayofweek`, `is_weekend` | **87 weeks** | yes |
+| `purchase_month` | **1.67 years** | **no** |
 
-| Model | PR-AUC with | without | delta | Brier with | without |
-|---|---:|---:|---:|---:|---:|
-| CatBoost | 0.21498 | 0.20927 | **−0.00571** | 0.08528 | **0.08374** |
-| LightGBM | 0.18755 | 0.20251 | **+0.01496** | 0.08910 | **0.08637** |
-| XGBoost | 0.18443 | 0.21498 | **+0.03055** | 0.08916 | **0.08528** |
+**Cross-validated PR-AUC improved for every GBDT:**
 
-Dropping it improves **Brier for all three** and PR-AUC for two of three — XGBoost by +0.031,
-twice Phase 4's entire GBDT-over-logistic margin. Only CatBoost prefers keeping it, and CatBoost
-is the model whose handling of the unseen values happens to land favourably. An effect whose
-*sign* flips between libraries is an accident.
+| Model | 39 features | 38 features | change |
+|---|---:|---:|---:|
+| LightGBM | 0.15278 | **0.15331** | +0.00053 |
+| CatBoost | 0.14893 | **0.14997** | +0.00104 |
+| XGBoost | 0.14675 | **0.14694** | +0.00019 |
 
-**Recommendation: drop it, leaving 38 features** — §5 explicitly sanctions this ("drop 1-3 dead
-or redundant features... if it lands at 37, write 37"). The alternative is cyclical encoding
-(`sin`/`cos` of month), which puts month 1 next to month 12 and so removes the extrapolation
-rather than the seasonality.
+**One number went down, and it should have.** Best calibration-window PR-AUC fell from 0.22455
+(CatBoost, 39 features) to 0.21520 (XGBoost, 38). CatBoost's old score was inflated by routing
+out-of-range months to a branch that happened to help; removing the accident removes the inflated
+number, while the honest metric improved for all three.
 
-**Not done unilaterally** because it changes `FEATURE_NAMES` 39 -> 38 and therefore the artifact's
-schema hash, invalidates Phase 4's tuned parameters and report, needs `make tune` and
-`make decide` re-run (~12 min), and plausibly changes which model leads. Settle it before Phase 6
-puts a model behind an `@champion` alias.
+**The replacement top feature is structurally sound**, which confirms the pathology was specific:
+`customer_zip_prefix_2` now leads at 0.319 with **98 of 98** calibration-time values seen in
+training, against `purchase_month`'s **0 of 2**. Its own audit is genuinely mixed (+0.009, +0.003,
+−0.007), so there is no case to drop it. `promised_days` rose 6th → 5th.
 
-### Phase 5 results
-
-**Ship CatBoost alone.** The blend collapsed onto it — the log-loss optimum is a corner solution
-with weight **1.0000** on CatBoost and 0.0000 on the other two, so the blend *is* CatBoost and the
-delta is exactly **+0.00000** against a 0.005 bar. §13 said "if the gain is under 0.005 PR-AUC,
-say plainly that the single model should ship"; here the gain is not small, it is nil.
+### Ship XGBoost (D31, superseding D30's model choice)
 
 | | PR-AUC | Blend weight |
 |---|---:|---:|
-| **CatBoost** | **0.22455** | **1.0000** |
-| LightGBM | 0.21107 | 0.0000 |
-| XGBoost | 0.20321 | 0.0000 |
-| blend | 0.22455 | — |
+| **XGBoost** | **0.21520** | 0.2328 |
+| CatBoost | 0.20850 | 0.7672 |
+| LightGBM | 0.20219 | 0.0000 |
+| blend | 0.21364 | — |
+| **delta** | **−0.00156** | |
 
-**The winner changed between phases.** Phase 4 ranked LightGBM first on CV over the *fit* window
-(0.1528 vs CatBoost 0.1489); on the *calibration* window CatBoost leads. Selection is unstable at
-this margin — consistent with D26 — which is a reason to treat Phase 9's promotion gate as the
-real arbiter rather than either number.
+The blend is now a real two-model mix rather than D30's corner solution — **and it is still worse
+on PR-AUC.** CatBoost takes most of the weight because its probabilities are better *scaled*;
+XGBoost wins because it *ranks* better, and PR-AUC measures ranking. The ensemble loses on both
+counts, so the single model ships with a **negative** delta rather than a small positive one.
 
-**Calibration worked, measured out-of-sample:** held-out Brier **0.085847 -> 0.083776**. The
-in-sample figure (0.084706 -> 0.082229) is printed beside it only to show the difference between
-the two.
+**Three rankings, three winners:** LightGBM on fit-window CV, XGBoost on the calibration window,
+CatBoost by blend weight. At these margins the ranking is not stable — which is the argument for
+letting Phase 9's gate decide on the evaluation set.
 
-**Threshold: 0.17** under an assumed 5:1 FN:FP cost ratio — 48.1% recall at a 21.6% flag rate,
-21.5% precision. The ratio is a premise, not a measurement (§4.7), and the sweep runs on a window
-whose base rate is about twice the evaluation window's, so it is lower than a deployment-era
-choice would be.
+**Calibration**, held out: Brier **0.085314 → 0.084070**. Less improvement than the 39-feature run
+(−0.0012 vs −0.0021), which is consistent: less miscalibration remains once the out-of-range
+feature is gone.
 
-**Business impact:** on-time orders average **4.291** of 5, late orders **2.272** — a gap of
-**2.019 review-score points**, with 100% review coverage. Reviews are analysis-only;
-`review_impact()` asserts no review column reached the feature matrix before returning a number.
+**Threshold 0.21** under an assumed 5:1 FN:FP ratio — 36.3% recall at a 13.7% flag rate, 25.6%
+precision, against 0.17 / 48.1% / 21.6% / 21.5% before. Better ranking and calibration means the
+cost-minimising point tolerates flagging fewer orders: precision up 4 points, flag rate down 8.
+
+**Business impact:** on-time orders average **4.291** of 5, late **2.272** — a **2.019**-point gap
+with full review coverage. Reviews are analysis-only; `review_impact()` asserts none reached the
+feature matrix.
 
 ### The design collision Phase 5 forced
 
-§13 lists "calibrating on data used to fit the blend" as a common mistake while asking for both
-the blend weights *and* the calibrator to be fitted on validation. Resolved by splitting the
-calibration window — and the split is **interleaved**, not temporal, because a temporal split
-leaves halves at **5.74% and 13.77%** positives (D20 reappearing inside two months) while
-interleaving keeps both at ~9.75%. See `DECISIONS.md` D28, including why this does not violate
+§13 lists "calibrating on data used to fit the blend" as a common mistake while asking for both on
+validation. Resolved by splitting the calibration window **interleaved**, not temporally — a
+temporal split leaves halves at **5.74% and 13.77%** positives (D20 inside two months) while
+interleaving keeps both near 9.75%. See `DECISIONS.md` D28 for why that does not violate
 invariant 5.
+
+### Two smaller fixes
+
+- The report sliced `FEATURE_NAMES` by hard-coded index ranges, which would have mislabelled every
+  family the moment a feature was removed. Families are now named tuples and `FEATURE_NAMES` is
+  built from them, with a test that the two cannot drift.
+- The gitignore negation for `reports/shap/` sat *before* the global `*.png` rule. Gitignore's last
+  match wins, so the plots stayed ignored despite the exception.
 
 ---
 
@@ -470,8 +477,8 @@ since the real dataset is 121 MB and CC BY-NC-SA and will never be in a workflow
 | 2 | Transform, validate, analytical table | 4 h | medium | ✅ **complete** · 80 tests |
 | 3 | As-of aggregates and feature assembly | 5 h | **hardest** | ✅ **complete** · all 3 parts |
 | 4 | Baselines and single models | 4 h | medium | ✅ **complete** · LightGBM leads at 0.1528 |
-| 5 | Ensemble, calibration, threshold | 4 h | medium | ✅ **complete** · ship CatBoost alone (D30) · ⚠️ D29 open |
-| 6 | MLflow, pyfunc wrapper, registry | 4 h | medium | **next** · settle D29 first · CatBoost ships, so `requirements-api.txt` **needs catboost** (D14) |
+| 5 | Ensemble, calibration, threshold | 4 h | medium | ✅ **complete** · ship XGBoost (D31) · D29 resolved |
+| 6 | MLflow, pyfunc wrapper, registry | 4 h | medium | **next** · XGBoost ships, so no `catboost` in `requirements-api.txt`, but `xgboost` pulls the 305 MB CUDA lib (D14) |
 | 7 | FastAPI and the parity test | 4 h | medium | ⚠️ read §18 A3, A6 first |
 | 8 | Docker and Compose | 3 h | medium | ⚠️ read §18 A5 first · validate `mlflow-skinny` **and** the 305 MB CUDA dependency (D14) |
 | 9 | Retraining lifecycle and promotion gate | 3.5 h | medium | ⚠️ read §18 A2 first; set the Brier tolerance against D20 |

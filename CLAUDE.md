@@ -146,26 +146,28 @@ splitting, Streamlit. If a change isn't in `PLAN.md`, ask before writing it.
 - Commit or push only when asked.
 
 ## Current phase
-**Phases 0-5 COMPLETE.** 302 tests pass. **Ship CatBoost alone** — the blend collapsed onto it
-with weight 1.0, so the delta is exactly +0.00000 against a 0.005 bar (D30). Calibration improves
-held-out Brier 0.0858 -> 0.0838. Threshold **0.17** under an assumed 5:1 FN:FP ratio: 48.1% recall
-at a 21.6% flag rate.
+**Phases 0-5 COMPLETE.** 304 tests pass. **Ship XGBoost alone** (D31). The blend is a genuine
+0.77/0.23 CatBoost/XGBoost mix and is still **worse** on PR-AUC (delta −0.00156), because weights
+are fitted on log-loss while PR-AUC measures ranking. Calibration improves held-out Brier
+0.0853 -> 0.0841. Threshold **0.21** under an assumed 5:1 FN:FP ratio: 36.3% recall at a 13.7%
+flag rate, 25.6% precision.
 
 `raw` holds 9 tables / 1,550,922 rows; `features.orders_analytical` holds 96,203 rows at a 6.79%
-`is_late` rate; six snapshot tables hold 34,427 rows; the **39-feature** matrix and a fitted
+`is_late` rate; six snapshot tables hold 34,427 rows; the **38-feature** matrix and a fitted
 `PreprocessingArtifact` build in ~4 s via `make features`; `src/splits.py` owns every date
 boundary and locks the promotion evaluation window.
 
-**⚠️ ONE DECISION IS OPEN BEFORE PHASE 6 (D29).** SHAP ranked `purchase_month` the #1 feature,
-but its fit-window values {5..12} and calibration values {1,2} **do not overlap at all** — it
-cannot have been learned. Dropping it improves Brier for all three models and PR-AUC for two of
-three (XGBoost by +0.031). Recommendation: drop it, leaving 38 features, which §5 explicitly
-sanctions. Not done unilaterally because it changes the artifact schema hash and invalidates
-Phase 4's tuned parameters. **Settle this before Phase 6 registers a model.**
+**38, not §5's 39: `purchase_month` was dropped** (D29). It was #1 by SHAP and could not have been
+learned — no calibration window shares a calendar month with its fit window, and months 9-12 occur
+in only one year, so a month effect is confounded with that year's operations. Dropping it improved
+cross-validated PR-AUC for all three GBDTs. The surviving timing features recur often enough to be
+estimable: 87 weeks for day-of-week against 1.67 years for month-of-year.
 
 **Next: Phase 6 — MLflow, pyfunc wrapper, registry** (~4 h), once D29 is settled. MLflow 3
 removed stages, so `@champion`/`@challenger` aliases are the only mechanism, and `log_model`
-takes `name=` where 2.x took `artifact_path=` (§18 A7).
+takes `name=` where 2.x took `artifact_path=` (§18 A7). **XGBoost ships, so
+`requirements-api.txt` does not need `catboost` — but `xgboost` is what pulls the 305 MB CUDA
+library D14 flagged, which makes `xgboost-cpu` directly relevant to Phase 8.**
 
 The `realtime-fraud-detection` stack is currently **stopped** to free RAM for tuning. Restart it
 with `docker start realtime-fraud-detection-redis-1 realtime-fraud-detection-scorer-1

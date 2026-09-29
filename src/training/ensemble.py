@@ -846,15 +846,26 @@ def write_report(result: dict[str, Any], path: Path = REPORT_PATH) -> None:
 
     audit = result.get("audit")
     if audit:
-        overlap = audit["overlap"] or "**none**"
+
+        def describe(values: list[Any], limit: int = 12) -> str:
+            """Summarise a value list: high-cardinality features would otherwise print 99
+            levels twice and bury the one number that matters."""
+            if not values:
+                return "**none**"
+            shown = ", ".join(f"`{v}`" for v in values[:limit])
+            more = f" … ({len(values)} values)" if len(values) > limit else ""
+            return shown + more
+
+        overlap = audit["overlap"]
         lines += [
             f"## Feature audit: `{audit['feature']}` (§5)",
             "",
             f"SHAP ranked `{audit['feature']}` first, so it is the feature the audit examines.",
             "",
-            f"- Values seen in the **fit** window: `{audit['fit_values']}`",
-            f"- Values seen at **calibration** time: `{audit['calibration_values']}`",
-            f"- Overlap: {overlap}",
+            f"- Values in the **fit** window: {describe(audit['fit_values'])}",
+            f"- Values at **calibration** time: {describe(audit['calibration_values'])}",
+            f"- **Overlap: {len(overlap)} of {len(set(audit['calibration_values']))}** "
+            f"calibration-time values were seen in training",
             "",
             "| Model | PR-AUC with | without | delta | Brier with | without |",
             "|---|---:|---:|---:|---:|---:|",
