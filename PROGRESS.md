@@ -5,8 +5,8 @@ that task. Source of truth for *what* to build is `PLAN.md`; this file only trac
 are*. Decisions and their reasons live in `DECISIONS.md`.
 
 - **Plan version:** v1 (2026-09-28) + amendments §18 · **Pre-flight completed:** 2026-09-28
-- **Current phase:** Phase 10 — Full CI/CD · **✅ COMPLETE**
-- **Overall:** **11 / 12 phases** · 444 tests green, zero skips · Phase 6's output rebuilt after two real bugs (D33, D35)
+- **Current phase:** Phase 11 — Documentation and interview prep · **✅ COMPLETE — all 12 phases done**
+- **Overall:** **12 / 12 phases** · 444 tests green, zero skips · Phase 6's output rebuilt after two real bugs (D33, D35)
 - **Estimated remaining:** ~20 h of build work (PLAN §3 budget: 36-42 h)
 
 ---
@@ -101,7 +101,66 @@ what a registry is for, and superseding is the more honest artefact. Moving the 
 documented one-off — `_assign_alias` correctly *refused* to promote v2, because promotion is the
 gate's call; withdrawing a version built by broken code is a correction, not a promotion on merit.
 
-### Phase 10 — CI that runs the ETL without ever holding the dataset
+### Phase 11 — the documentation found the project's most important result
+
+**Complete, and all twelve phases with it.** `README.md` has the architecture diagram, the results
+chain from baselines through single models to the ensemble, latency, one-command reproduction and a
+nine-point limitations section. `reports/interview_notes.md` answers §13's nine questions.
+
+#### D45 — writing the results table produced the finding
+
+§13 asks for a results table **on the holdout**, and only the champion and challenger had ever been
+scored there. Adding the baselines took ten minutes and changed what this project is about:
+
+| model (holdout, 25,352 rows, identical features) | PR-AUC | lift | ROC-AUC | Brier |
+|---|---:|---:|---:|---:|
+| majority class (no skill) | 0.04398 | 1.00x | 0.500 | 0.042256 |
+| **logistic regression** | **0.09163** | **2.08x** | **0.668** | 0.064591 |
+| champion — tuned LightGBM | 0.05983 | 1.36x | 0.612 | **0.049307** |
+
+**A logistic regression ranks better than the model that shipped**, by 0.03181 PR-AUC — **six times**
+the 0.005 reproducibility floor, so not noise. And it **reverses in-window**: on cross-validation
+over the fit window the ordering is LightGBM 0.15349, CatBoost 0.15209, XGBoost 0.14666, logistic
+0.13545. The GBDTs win where they were tuned and lose where it counts — the signature of a model
+fitted to a period rather than a phenomenon, and consistent with D22 (weak history features), D20
+(non-stationary base rate) and D42 (two more months of data bought the retrain nothing).
+
+The nuance that travels with it: the champion is **better calibrated** (Brier 0.049 against 0.065),
+because its probabilities pass through isotonic calibration and the logistic's are raw. PR-AUC and
+ROC-AUC measure ranking; Brier measures calibration. Reporting only one would be choosing the
+flattering half.
+
+Made reproducible rather than quoted: `make holdout-reference`, which prints the table and says out
+loud when the champion is not top.
+
+#### Nothing was changed in response, deliberately
+
+§13 requires a losing challenger to be recorded rather than tuned until it wins, and the same
+discipline applies to a *winning baseline*. Reacting to one window is how an evaluation set becomes a
+training set. The principled step is to register the logistic as a challenger and let the gate judge
+it — which is the first item in the interview notes' final answer, not something done in a hurry at
+the end of a phase.
+
+It also exposes the gate's second limit, next to D42's image coupling: **a gate is only as good as
+the candidates offered to it.** It compares champion against challenger, and the baseline was never a
+challenger.
+
+#### A third copy of one helper, caught in the same hour
+
+Writing `scripts/holdout_reference.py` needed the MLflow tracking URI, which already existed as a
+private `_tracking_uri()` in **both** `train.py` and `promote.py`. That would have been a third copy
+— invariant 17 again, about ninety minutes after the invariant was written. It now lives once in
+`src/registry/__init__.py` with three callers.
+
+#### A number I got wrong and the report corrected
+
+The README's CV lift column divides by the majority-class PR-AUC (0.06559), not the window's 5.85%
+positive rate, because a no-skill PR-AUC equals the base rate *of the folds scored*. I first wrote
+that the folds "range from 3.6% to 9.2%" from memory; `reports/phase4_models.md` says 2.8%, 4.2%,
+9.6%, 9.7%, averaging 0.06557 — which is the majority-class figure to four decimals. Corrected by
+reading the report instead of recalling it.
+
+### Phase 10 — CI that runs the ETL without ever holding the dataset### Phase 10 — CI that runs the ETL without ever holding the dataset
 
 **Complete.** `ci.yml` runs ruff, black, then pytest in two passes — the unit and contract tests
 (needing no services, with coverage) and the `ci_etl` pass against a **Postgres service container**.
@@ -911,7 +970,7 @@ since the real dataset is 121 MB and CC BY-NC-SA and will never be in a workflow
 | 8 | Docker and Compose | 3 h | medium | ✅ **done** · **1.03 GB** image, 65 packages · cold cycle verified · D41 band ships lightgbm |
 | 9 | Retraining lifecycle and promotion gate | 3.5 h | medium | ✅ **done** · gate ran for real and **refused** · holdout lift **1.36x** |
 | 10 | Full CI/CD | 3 h | medium | ✅ **done** · pytest + Postgres service container · GHCR on main |
-| 11 | Documentation and interview prep | 2.5 h | easy | **next, and last** · lead with **1.36x lift**, not 0.216 |
+| 11 | Documentation and interview prep | 2.5 h | easy | ✅ **done** · D45: a logistic baseline beats the shipped GBDT on the holdout |
 
 **If behind schedule, cut in this order** (PLAN §3): drift report, prediction logging,
 API-key auth, CLI wrapper, CatBoost, Optuna (keep `TimeSeriesSplit`), trainer profile.

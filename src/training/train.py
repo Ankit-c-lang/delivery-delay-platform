@@ -45,6 +45,7 @@ from mlflow.models import infer_signature
 from src.evaluation.metrics import summarize, trivial_baseline
 from src.evaluation.plots import all_plots
 from src.features.build import FEATURE_FAMILIES, FEATURE_NAMES
+from src.registry import tracking_uri
 from src.registry.pyfunc_wrapper import DelayPredictor, raw_input_example
 from src.training.ensemble import (
     blend_probabilities,
@@ -184,7 +185,7 @@ def train(version: str = "v1", register: bool = True) -> TrainingResult:
     tuned = load_tuned_params()
     seed = model_cfg.get("seed", 42)
 
-    mlflow.set_tracking_uri(mlflow_cfg.get("tracking_uri_env", None) or _tracking_uri())
+    mlflow.set_tracking_uri(mlflow_cfg.get("tracking_uri_env", None) or tracking_uri())
     mlflow.set_experiment(mlflow_cfg["experiment"])
 
     built = build_matrix(version)
@@ -407,17 +408,6 @@ def train(version: str = "v1", register: bool = True) -> TrainingResult:
     )
 
 
-def _tracking_uri() -> str:
-    """Tracking URI from the environment, defaulting to the Compose service.
-
-    Clients always speak HTTP to the tracking server; only the server itself touches the
-    SQLite backend store (DECISIONS.md D12).
-    """
-    import os
-
-    return os.environ.get("MLFLOW_TRACKING_URI", "http://127.0.0.1:5000")
-
-
 def _assign_alias(
     version_key: str,
     splits: Any,
@@ -508,7 +498,7 @@ def describe_registry() -> list[dict[str, Any]]:
     quoting reliably, and because the code that writes these tags is the right place to read
     them back.
     """
-    mlflow.set_tracking_uri(_tracking_uri())
+    mlflow.set_tracking_uri(tracking_uri())
     client = mlflow.MlflowClient()
     versions = client.search_model_versions(f"name='{REGISTERED_MODEL_NAME}'")
 

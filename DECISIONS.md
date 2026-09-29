@@ -1637,3 +1637,52 @@ only as good as the variation it exposes the code to. D35: reproducibility means
 environment, not repeating the run. D40: a venv cannot tell you what an image needs. Here: a test
 suite exercised through one entry point has been tested against one entry point. In all three the
 measurement was correct and its *setting* was doing the lying.
+
+---
+
+## D45
+### A logistic regression beats the tuned GBDT on held-out data
+**Date.** 2026-09-29 (Phase 11)
+
+**Measured**, on the 25,352-row promotion evaluation window, every model seeing identical features
+through the champion's own artifact. Reproduce with `make holdout-reference`:
+
+| model | PR-AUC | lift | ROC-AUC | Brier |
+|---|---:|---:|---:|---:|
+| majority class (no skill) | 0.04398 | 1.00x | 0.500 | 0.042256 |
+| **logistic regression** | **0.09163** | **2.08x** | **0.668** | 0.064591 |
+| champion v4 (tuned LightGBM) | 0.05983 | 1.36x | 0.612 | 0.049307 |
+
+**The baseline ranks better than the model that shipped**, by 0.03181 PR-AUC — **six times** the
+0.005 reproducibility floor D35 measured, so this is a real difference and not noise.
+
+**It reverses in-window.** On cross-validation over v1's fit window the ordering is the expected one:
+LightGBM 0.15349, CatBoost 0.15209, XGBoost 0.14666, logistic regression 0.13545. The GBDTs win where
+they were tuned and lose where it counts. That is the textbook signature of a model fitted to a
+period rather than to a phenomenon — and it is consistent with everything already measured here:
+D22 found the history features weak, D20 found the base rate non-stationary, and D42 found that two
+extra months of data bought the retrain nothing.
+
+**One nuance that must travel with the headline.** The champion is *better calibrated* — Brier
+0.0493 against 0.0646 — because its probabilities pass through an isotonic calibrator while the
+logistic's are raw. PR-AUC and ROC-AUC measure **ranking**, Brier measures **calibration**, and the
+two models are genuinely better at different things. If the deployed decision is "flag the top N%",
+ranking is what matters and the baseline wins. If a downstream system consumes the probability as a
+probability, calibration matters and the champion wins. Reporting only one of those numbers would be
+choosing the flattering half.
+
+**What was NOT done, deliberately.** The logistic was not registered, promoted, or tuned into the
+pipeline. §13 is explicit that a losing challenger is recorded rather than tuned until it wins, and
+the same discipline applies to a winning baseline: reacting to a single window is how a promotion
+evaluation set turns into a training set. The honest action is to *report* it, which the README now
+does above the fold, and to note what would settle it — more evaluation windows, which this dataset's
+20-month span cannot supply.
+
+**Why the gate did not catch this.** It compares the champion against a *challenger*, and the
+baseline was never a challenger. A gate is only as good as the candidates offered to it. Registering
+the logistic baseline as a challenger and letting the gate decide would be the principled next step,
+and it is out of scope here — but it is the first thing worth doing with another week.
+
+**These are references, not candidates**, which is why scoring them does not add selection bias to
+§18 A3's argument: bias comes from *choosing* on a window, and a model that cannot be chosen cannot
+bias the choice. The gate still reads the window exactly twice, once per contested run.

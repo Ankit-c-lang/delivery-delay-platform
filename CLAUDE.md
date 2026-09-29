@@ -306,14 +306,22 @@ console script does not — the Makefile used the former for ten phases, so the 
 owner's capitals and Docker rejects them. **In CI the three live-container tests skip** (no
 `delay-api` there), so CI will not show local's zero skips; the job summary says so.
 
-**Next: Phase 11 — Documentation and interview prep** (~2.5 h), the last phase.
-- **Lead with 1.36x lift on the held-out window, not 0.216 PR-AUC** (D42). The README already does;
-  keep it that way. Quoting 0.216 without naming its window is the one dishonest number available.
-- §13 requires the CV wording to avoid implying a hosted deployment exists. It does not: CD here is
-  a versioned smoke-tested artifact in GHCR plus a Compose deploy.
-- The strongest material is not the model. It is D33, D35, D38 and D41 — four bugs that each passed
-  their own tests for weeks — plus the gate refusing a retrain and `purchase_month` being dropped
-  because `sin`/`cos` cannot manufacture a second November.
+**Phase 11 COMPLETE — all 12 phases done.** `README.md` carries the architecture diagram, the full
+results chain, latency, one-command reproduction and a nine-point limitations section;
+`reports/interview_notes.md` answers §13's nine questions.
+
+**D45, found while writing the results table, is now the most important fact in the repository:**
+a **logistic regression beats the tuned GBDT on the held-out window** — 2.08x lift against 1.36x,
+a 0.03181 PR-AUC gap that is **6x the 0.005 reproducibility floor**, so not noise. In-window the
+ordering reverses (CV: LightGBM 0.15349, logistic 0.13545). The GBDTs win where they were tuned and
+lose where it counts. The champion is still **better calibrated** (Brier 0.049 vs 0.065), because its
+probabilities pass through isotonic and the logistic's are raw — ranking and calibration are
+different things. Reproduce with `make holdout-reference`.
+
+**Nothing was changed in response.** §13's discipline — record a losing challenger rather than tune
+until it wins — applies equally to a winning baseline. Reacting to one window is how an evaluation
+set becomes a training set. The principled next step is to **register the logistic as a challenger
+and let the gate decide**, which is the first item in the interview notes' final answer.
 
 The `realtime-fraud-detection` stack is currently **stopped** to free RAM. Restart it with
 `docker start realtime-fraud-detection-redis-1 realtime-fraud-detection-scorer-1

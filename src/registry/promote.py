@@ -44,7 +44,11 @@ import yaml
 
 from src.evaluation.metrics import COMPARISON_EPSILON
 from src.evaluation.score_holdout import HoldoutScores, describe, load_holdout, score_model
-from src.registry.pyfunc_wrapper import SignatureMismatchError, assert_signature_matches_contract
+from src.registry import tracking_uri
+from src.registry.pyfunc_wrapper import (
+    SignatureMismatchError,
+    assert_signature_matches_contract,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -374,7 +378,7 @@ def run_gate(*, apply: bool = True, config: dict[str, Any] | None = None) -> Pro
     import mlflow
 
     settings = config or load_gate_config()
-    mlflow.set_tracking_uri(_tracking_uri())
+    mlflow.set_tracking_uri(tracking_uri())
     client = mlflow.MlflowClient()
 
     challenger = _resolve(client, settings["challenger_alias"])
@@ -455,13 +459,6 @@ def run_gate(*, apply: bool = True, config: dict[str, Any] | None = None) -> Pro
     for check in decision.checks:
         logger.info("  %-15s %s — %s", check.name, "pass" if check.passed else "FAIL", check.detail)
     return decision
-
-
-def _tracking_uri() -> str:
-    """Tracking URI from the environment, matching the rest of the project (D12)."""
-    import os
-
-    return os.environ.get("MLFLOW_TRACKING_URI", "http://127.0.0.1:5000")
 
 
 def main(argv: list[str] | None = None) -> int:
